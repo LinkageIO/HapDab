@@ -1,0 +1,3 @@
+git+https://github.com/schae234/Minus80.git
+pandas==0.16.2
+scipy==0.16.0
