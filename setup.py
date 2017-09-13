@@ -63,6 +63,6 @@ setup(
     author = 'Rob Schaefer',
     author_email = 'rob@linkage.io',
     description = 'An library for managing and analyzing genotypes and haplotypes',
-    license = "Copyright Linkage Analytics 2016. Available under the MIT License",
+    license = "Copyright Linkage Analytics 2017. Available under the MIT License",
     url = 'linkage.io'
 )
