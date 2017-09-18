@@ -1,23 +1,39 @@
 from minus80 import Freezable
 from itertools import chain,repeat
 
+from hapdab.RawFile import RawFile 
+
 import numpy as np
 import pandas as pd
 import time as time
+
+from locuspocus import Locus,Loci
 
 class VarDab(Freezable):
 
     def __init__(self,name):
         super().__init__(name)
+        self.loci = Loci(name)     
         self._initialize_tables()
 
-    def genotypes(self,samples=None,as_dataframe=True,):
+    def genotypes(self,samples=None,variants=None,as_dataframe=True):
+        '''
+            Returns genotypes from a list of samples
+            and a list of loci
+        
+            Parameters
+            ----------
+            samples : iterable of sample ids
+
+            variants : an iterable of variants 
+
+        '''
         query = 'SELECT * FROM sample_genotypes '
         if samples != None:
             query += 'WHERE sample in ("{}")'.format('","'.join(samples))
 
         data = self._db.cursor().execute(
-            query,
+            query
         )
         if as_dataframe == True:
             data = pd.DataFrame(
@@ -70,7 +86,7 @@ class VarDab(Freezable):
                     )
             }
             # Iterate over the file and build the pieces of the database
-            with open(filename,'r') as IN:
+            with RawFile(filename) as IN:
                 genotypes = []
                 for line_id,line in enumerate(IN):
                     if line_id % 100_000 == 0 and line_id > 0:
@@ -158,10 +174,18 @@ class VarDab(Freezable):
             cur.execute('RELEASE SAVEPOINT add_vcf')
             raise e
 
-    def to_VCF(self,filename):
+    def to_VCF(self,filename, samples=None):
+        '''
+            Outputs genotypes to a VCF file
+
+            Parameters
+            ----------
+            filename : string
+                outputs the VCF to the filename provided
+        '''
         genos = []
-        tab = '\t'
-        cvar = None
+        tab = '\t'          # Line delimiter
+        cvar = None         # current var
         with open(filename,'w') as OUT:
             print('##fileformat=VCFv4.1',file=OUT) 
             print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join(self.samples)),file=OUT)
@@ -337,7 +361,7 @@ class VarDab(Freezable):
         cur.execute('''
         CREATE TABLE IF NOT EXISTS headers (
             FILEID INT,  -- Maps to files
-            LINEID INT,  -- Records the lin
+            LINEID INT,  -- Records the line number
             tag TEXT,
             key TEXT DEFAULT NULL,
             val TEXT,
@@ -371,6 +395,7 @@ class VarDab(Freezable):
             VARIANTID INTEGER,
             qual REAL,
             filter TEXT,
+            PRIMARY KEY(FILEID, VARIANTID),
             FOREIGN KEY(FILEID) REFERENCES files(FILEID),
             FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID)
         );
@@ -388,6 +413,7 @@ class VarDab(Freezable):
             FILEID INTEGER,
             INFOID INTEGER,
             VARIANTID INTEGER,
+            value text,
             FOREIGN KEY(FILEID) REFERENCES files(FILEID),
             FOREIGN KEY(INFOID) REFERENCES info(INFOID),
             FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID)
