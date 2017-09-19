@@ -16,6 +16,13 @@ class VarDab(Freezable):
         self.loci = Loci(name)     
         self._initialize_tables()
 
+
+    def conform(self, Fasta):
+        '''
+            Conform the Ref and Alt genotypes to a reference
+            Fasta Object
+        '''
+
     def genotypes(self,samples=None,variants=None,as_dataframe=True):
         '''
             Returns genotypes from a list of samples
@@ -65,6 +72,42 @@ class VarDab(Freezable):
     def shape(self):
         return (self.num_snps,self.num_accessions)
 
+    def _add_header(self, file_id, line_id, items, cur=None):
+        if cur == None:
+            cur = self._db.cursor()
+        for item in items:
+            cur.execute(
+                "INSERT INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
+                item
+            )
+            if item[0] == 'FORMAT' and item[1] == 'ID': 
+                cur.execute('INSERT OR IGNORE INTO format (format) VALUES (?)',(item[2],))
+            elif item[0] == 'INFO' and item[1] == 'ID':
+                cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
+
+    def _add_sample(self,samples,cur=None):
+        if cur == None:
+            cur = self._db.cursor()
+        cur.executemany(
+                'INSERT INTO samples (FILEID,sample) VALUES ({},?)'.format(file_id),
+                [(x,) for x in samples ]
+            )
+        # Parse out the INFO and FMT fields
+        cur_info = {
+            key:ID for key,ID in cur.execute('SELECT info, INFOID FROM info')        
+        } 
+        cur_format = {
+            key:ID for key,ID in cur.execute('SELECT format, FMTID FROM format')        
+        } 
+        cur_samples = {
+            key:ID for key,ID in cur.execute(
+                '''SELECT sample,SAMPLEID from samples 
+                   WHERE FILEID = "{}" 
+                   ORDER BY SAMPLEID'''.format(file_id)
+            )        
+        } 
+        return cur_info,cur_format,cur_samples
+
     def add_VCF(self, filename):
         cur = self._db.cursor()
         cur.execute('PRAGMA synchronous = off')
@@ -102,53 +145,26 @@ class VarDab(Freezable):
                     # Case 1: Header line
                     if line.startswith('##'):
                         items = self.parse_header(line)
-                        for item in items:
-                            cur.execute(
-                                "INSERT INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
-                                item
-                            )
-                            if item[0] == 'FORMAT' and item[1] == 'ID': 
-                                cur.execute('INSERT OR IGNORE INTO format (format) VALUES (?)',(item[2],))
-                            elif item[0] == 'INFO' and item[1] == 'ID':
-                                cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
+                        self._add_header(file_id,line_id,items,cur=cur)
                     # Case 2: Sample Line
                     elif line.startswith('#CHROM'):
-                        samples = line.split('\t')[9:]
-                        cur.executemany(
-                            'INSERT INTO samples (FILEID,sample) VALUES ({},?)'.format(file_id),
-                            [(x,) for x in samples ]
-                        )
-                        # Parse out the INFO and FMT fields
-                        cur_info = {
-                            key:ID for key,ID in cur.execute('SELECT info,INFOID FROM info')        
-                        } 
-                        cur_format = {
-                            key:ID for key,ID in cur.execute('SELECT format,FMTID FROM format')        
-                        } 
-                        cur_samples = {
-                            key:ID for key,ID in cur.execute(
-                                '''SELECT sample,SAMPLEID from samples 
-                                   WHERE FILEID = "{}" 
-                                   ORDER BY SAMPLEID'''.format(file_id)
-                            )        
-                        } 
+                        cur_samples = line.split('\t')[9:]
                     # Case 3: Genotypes
                     else:
                         chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split('\t')
-                        # Insert the variant
-                        if (chrom,pos) not in cur_vars:
-                            cur.execute('''
-                                INSERT INTO variants (chrom,pos,id,ref,alt) VALUES (?,?,?,?,?)
-                            ''',(chrom,pos,id,ref,alt))
-                            var_id = self._db.last_insert_rowid()
-                        else:
-                            var_id = cur_vars[(chrom,pos)]
+                        info = [field.split('=') for field in info.split(';')]
+                        variant = Locus(
+                           chrom, pos,
+                           id=id, ref=ref, alt=alt,
+                        )
+                        if variant not in self.loci:
+                            self.loci.add_locus(variant)     
+                        var_id = self.loci.rowid(variant.id) 
                         # Insert the observed QUAL score
                         cur.execute('''
                             INSERT INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
                         ''',(file_id,var_id,qual,fltr))
                         # Insert the info fields
-                        info = [field.split('=') for field in info.split(';')]
                         # Find the Genotype Field Index
                         GT_ind = fmt.split(':').index('GT')
                         # Insert the genotypes 
