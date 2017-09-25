@@ -1,11 +1,12 @@
-from minus80 import Freezable
-from itertools import chain,repeat
-
-from hapdab.RawFile import RawFile 
+#!/bin/env python3
 
 import numpy as np
 import pandas as pd
 import time as time
+
+from minus80 import Freezable, Cohort, Accession
+from itertools import chain,repeat
+from hapdab.RawFile import RawFile 
 
 from locuspocus import Locus,Loci
 
@@ -14,6 +15,13 @@ class VarDab(Freezable):
     def __init__(self,name):
         super().__init__(name)
         self.loci = Loci(name)     
+        self._db.cursor().execute(
+            'ATTACH DATABASE ? AS loci;',(self.loci._dbfilename(),)
+        )
+        self.cohort = Cohort(name)
+        self._db.cursor().execute(
+            'ATTACH DATABASE ? AS cohort;',(self.cohort._dbfilename(),)
+        )
         self._initialize_tables()
 
 
@@ -23,7 +31,7 @@ class VarDab(Freezable):
             Fasta Object
         '''
 
-    def genotypes(self,samples=None,variants=None,as_dataframe=True):
+    def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
             Returns genotypes from a list of samples
             and a list of loci
@@ -36,8 +44,10 @@ class VarDab(Freezable):
 
         '''
         query = 'SELECT * FROM sample_genotypes '
-        if samples != None:
-            query += 'WHERE sample in ("{}")'.format('","'.join(samples))
+
+        if accessions != None:
+            cur_accessions = self.cohort.AID_mapping
+            AIDs = [cur_accessions[x] for x in accessions if x in cur_accessions]
 
         data = self._db.cursor().execute(
             query
@@ -58,15 +68,11 @@ class VarDab(Freezable):
 
     @property
     def num_accessions(self):
-        return self._db.cursor().execute(
-            "SELECT COUNT(*) FROM samples"        
-        ).fetchone()[0]
+        return len(self.cohort)
 
     @property
     def num_snps(self):
-        return self._db.cursor().execute(
-            "SELECT COUNT(*) FROM variants" 
-        ).fetchone()[0]
+        return len(self.loci)
 
     @property
     def shape(self):
@@ -85,29 +91,6 @@ class VarDab(Freezable):
             elif item[0] == 'INFO' and item[1] == 'ID':
                 cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
 
-    def _add_sample(self,samples,cur=None):
-        if cur == None:
-            cur = self._db.cursor()
-        cur.executemany(
-                'INSERT INTO samples (FILEID,sample) VALUES ({},?)'.format(file_id),
-                [(x,) for x in samples ]
-            )
-        # Parse out the INFO and FMT fields
-        cur_info = {
-            key:ID for key,ID in cur.execute('SELECT info, INFOID FROM info')        
-        } 
-        cur_format = {
-            key:ID for key,ID in cur.execute('SELECT format, FMTID FROM format')        
-        } 
-        cur_samples = {
-            key:ID for key,ID in cur.execute(
-                '''SELECT sample,SAMPLEID from samples 
-                   WHERE FILEID = "{}" 
-                   ORDER BY SAMPLEID'''.format(file_id)
-            )        
-        } 
-        return cur_info,cur_format,cur_samples
-
     def add_VCF(self, filename):
         cur = self._db.cursor()
         cur.execute('PRAGMA synchronous = off')
@@ -120,14 +103,6 @@ class VarDab(Freezable):
                 INSERT OR IGNORE INTO files (filename) VALUES (?)
             ''',(filename,))
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
-            # Get a list of current variants and their ids
-            cur_vars = { 
-                (chrom,pos):(VID,id) \
-                    for VID,chrom,pos,id \
-                    in cur.execute(
-                        'SELECT VARIANTID, chrom, pos, id FROM variants'
-                    )
-            }
             # Iterate over the file and build the pieces of the database
             with RawFile(filename) as IN:
                 genotypes = []
@@ -148,7 +123,10 @@ class VarDab(Freezable):
                         self._add_header(file_id,line_id,items,cur=cur)
                     # Case 2: Sample Line
                     elif line.startswith('#CHROM'):
-                        cur_samples = line.split('\t')[9:]
+                        cur_samples = [Accession(name,files=[filename]) for name in line.split('\t')[9:]]
+                        for sample in cur_samples:
+                            self.cohort.add_accession(sample)
+                        cur_samples = self.cohort.AID_mapping
                     # Case 3: Genotypes
                     else:
                         chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split('\t')
@@ -384,26 +362,6 @@ class VarDab(Freezable):
             FOREIGN KEY(FILEID) REFERENCES files(FILEID)
         );
         ''')
-        # Samples
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS samples (
-            FILEID INTEGER,  -- Maps to files
-            SAMPLEID INTEGER PRIMARY KEY AUTOINCREMENT,
-            sample TEXT,
-            FOREIGN KEY(FILEID) REFERENCES files(FILEID)
-        );
-        ''')
-        # Variants
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS variants (
-            VARIANTID INTEGER PRIMARY KEY AUTOINCREMENT,
-            chrom TEXT,
-            pos INT,
-            id TEXT,
-            ref TEXT,
-            alt TEXT
-        );
-        ''')
         # Variant Quality
         cur.execute('''
         CREATE TABLE IF NOT EXISTS variant_qual (
@@ -459,12 +417,14 @@ class VarDab(Freezable):
 
         # Create some views
         cur.execute(''' 
-            CREATE VIEW IF NOT EXISTS sample_genotypes AS
+            CREATE TEMP VIEW sample_genotypes AS
             SELECT 
-             chrom,pos,ref,alt,
-             sample, dosage, flag
+             chromosome,
+             start,
+             name, 
+             dosage, 
+             flag
             FROM genotypes 
-            CROSS JOIN variants on genotypes.VARIANTID = variants.VARIANTID
-            CROSS JOIN samples on genotypes.SAMPLEID = samples.SAMPLEID
-            ORDER BY chrom, pos, sample
+            CROSS JOIN loci.loci on genotypes.VARIANTID = loci.loci.rowid
+            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID
         ''')
