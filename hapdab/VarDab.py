@@ -54,8 +54,8 @@ class VarDab(Freezable):
         )
         if as_dataframe == True:
             data = pd.DataFrame(
-                data.fetchall(),
-                columns = ['chrom','pos','alt','ref','sample','dosage','flag']
+                list(data),
+                columns = ['chrom','pos','ref','alt','sample','dosage','flag']
             )
             data['flag'] = [bin(x) for x in data['flag']]
         return data
@@ -405,14 +405,35 @@ class VarDab(Freezable):
         CREATE TABLE IF NOT EXISTS genotypes (
             FILEID INT,
             VARIANTID INT,
-            SAMPLEID INT,
+            SAMPLEID INT,  -- Accession Name
             flag INT,      -- bit flag containing information for the variant 
-            dosage FLOAT,
+            dosage FLOAT,  -- ALT Dosage
             PRIMARY KEY(FILEID,VARIANTID,SAMPLEID),
             FOREIGN KEY(FILEID) REFERENCES files(FILEID),
             FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID),
             FOREIGN KEY(SAMPLEID) REFERENCES samples(SAMPLEID)
         ); 
+        ''')
+
+        # Create a View where variants also have ref and alt alleles
+        cur.execute('''
+            CREATE TEMP VIEW loci_alleles AS
+            SELECT 
+                loci.rowid AID, 
+                loci.id, 
+                chromosome, 
+                start, 
+                end, 
+                ref.val AS rAllele, 
+                alt.val AS aAllele
+            FROM loci
+            LEFT OUTER JOIN loci_attrs ref 
+                ON loci.id = ref.id 
+                AND ref.key = "ref" 
+            LEFT OUTER JOIN loci_attrs alt 
+                ON loci.id = alt.id 
+                AND alt.key = "alt"
+
         ''')
 
         # Create some views
@@ -421,10 +442,15 @@ class VarDab(Freezable):
             SELECT 
              chromosome,
              start,
-             name, 
+             loci_alleles.rAllele,
+             loci_alleles.aAllele,
+             cohort.accessions.name, 
              dosage, 
              flag
             FROM genotypes 
-            CROSS JOIN loci.loci on genotypes.VARIANTID = loci.loci.rowid
+            CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
+            -- CROSS JOIN loci.loci on genotypes.VARIANTID = loci.loci.rowid
             CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID
         ''')
+    
+
