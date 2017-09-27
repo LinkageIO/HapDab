@@ -14,11 +14,11 @@ class VarDab(Freezable):
 
     def __init__(self,name):
         super().__init__(name)
-        self.loci = Loci(name)     
+        self.loci = Loci(name+'.VarDab')     
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS loci;',(self.loci._dbfilename(),)
         )
-        self.cohort = Cohort(name)
+        self.cohort = Cohort(name+'.VarDab')
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS cohort;',(self.cohort._dbfilename(),)
         )
@@ -30,6 +30,7 @@ class VarDab(Freezable):
             Conform the Ref and Alt genotypes to a reference
             Fasta Object
         '''
+        
 
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
