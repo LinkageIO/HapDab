@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import time as time
+from collections import namedtuple
 
 from minus80 import Freezable, Cohort, Accession
 from itertools import chain,repeat
@@ -11,6 +12,12 @@ from hapdab.RawFile import RawFile
 from locuspocus import Locus,Loci
 
 class VarDab(Freezable):
+
+    genoRecord = namedtuple(
+        'genoRecord',
+        ['varid','chrom','pos','ref','alt','sample','dosage','flag']
+    )
+
 
     def __init__(self,name):
         super().__init__(name)
@@ -32,7 +39,7 @@ class VarDab(Freezable):
         
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
-            Returns genotypes from a list of samples
+            Returns genotypes from a list of accessions
             and a list of loci
         
             Parameters
@@ -41,12 +48,21 @@ class VarDab(Freezable):
 
             variants : an iterable of variants 
 
+            Returns
+            -------
+            a DataFrame if as_dataframe is true
+            else an iterable of genoRecords (a named tuple)
+
         '''
+        # Build the basic query
         query = 'SELECT * FROM sample_genotypes '
+
+        # add on options for accessions ...
         if accessions != None:
             # NOTE: This is susceptible to SQL Injection ...
             names = [x.name for x in accessions] 
             query += " WHERE name IN ('{}')".format("','".join(names))
+        # ... and variants
         if variants != None:
             if 'WHERE' in query:
                 query += ' AND'
@@ -54,21 +70,25 @@ class VarDab(Freezable):
                 query += ' WHERE'
             ids = [x.id for x in variants]
             query += " id IN ('{}')".format("','".join(ids))
+        # Execute the query
         data = self._db.cursor().execute(
             query 
         )
+        # Package up the results
         if as_dataframe == True:
             data = pd.DataFrame(
                 list(data),
-                columns = ['chrom','pos','ref','alt','sample','dosage','flag']
+                columns = ['ID','chrom','pos','ref','alt','sample','dosage','flag']
             )
             data['flag'] = [bin(x) for x in data['flag']]
+        else:
+            data = (self.genoRecord(*x) for x in data)
         return data
 
     @property
-    def samples(self):
+    def accessions(self):
         return [ x[0] for x in self._db.cursor().execute(
-            "SELECT sample FROM samples ORDER BY sample"        
+            "SELECT name FROM accessions ORDER BY name"        
         ).fetchall()]
 
     @property
@@ -96,6 +116,28 @@ class VarDab(Freezable):
             elif item[0] == 'INFO' and item[1] == 'ID':
                 cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
 
+
+    def _dump_VCF_records_to_db(self,cur,variants,genotypes,start_time):
+        '''
+            A convenience method to add_VCF
+        '''
+        self.loci.add_loci(variants)
+        GID_map = {
+            x.id : self.loci.rowid(x.id) for x in variants 
+        }
+        # swap out the IDS for the GIDS
+        for geno in genotypes:
+            geno[1] = GID_map[geno[1]]
+        cur.executemany('''
+            INSERT INTO genotypes VALUES (?,?,?,?,?) 
+        ''',genotypes)
+        elapsed = time.time() - start_time 
+        rate = int(len(variants) / elapsed)
+        print(f"Processed {len(variants)} variants ({rate}/second)")
+        del genotypes[:]
+        del variants[:]
+        start_time = time.time()
+
     def add_VCF(self, filename):
         cur = self._db.cursor()
         cur.execute('PRAGMA synchronous = off')
@@ -110,17 +152,11 @@ class VarDab(Freezable):
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
             # Iterate over the file and build the pieces of the database
             with RawFile(filename) as IN:
+                variants = []
                 genotypes = []
                 for line_id,line in enumerate(IN):
-                    if line_id % 100_000 == 0 and line_id > 0:
-                        cur.executemany('''
-                            INSERT INTO genotypes VALUES (?,?,?,?,?) 
-                        ''',genotypes)
-                        elapsed = time.time() - start_time 
-                        rate = int(100_000 / elapsed)
-                        print(f"Processed {line_id} variants ({rate}/second)")
-                        genotypes = []
-                        start_time = time.time()
+                    if len(variants) >= 100_000:
+                        self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
                     line = line.strip()
                     # Case 1: Header line
                     if line.startswith('##'):
@@ -129,51 +165,45 @@ class VarDab(Freezable):
                     # Case 2: Sample Line
                     elif line.startswith('#CHROM'):
                         cur_samples = [Accession(name,files=[filename]) for name in line.split('\t')[9:]]
-                        for sample in cur_samples:
-                            self.cohort.add_accession(sample)
+                        self.cohort.add_accessions(cur_samples)
                         cur_samples = self.cohort.AID_mapping
                     # Case 3: Genotypes
                     else:
+                        # Split the line into its parts
                         chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split('\t')
                         info = [field.split('=') for field in info.split(';')]
+                        # Make a variant
                         variant = Locus(
                            chrom, pos,
                            id=id, ref=ref, alt=alt,
                         )
-                        if variant not in self.loci:
-                            self.loci.add_locus(variant)     
-                        var_id = self.loci.rowid(variant.id) 
+                        variants.append(variant)
+                        var_id = variant.id
                         # Insert the observed QUAL score
                         cur.execute('''
-                            INSERT INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
+                            INSERT OR REPLACE INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
                         ''',(file_id,var_id,qual,fltr))
-                        # Insert the info fields
                         # Find the Genotype Field Index
                         GT_ind = fmt.split(':').index('GT')
                         # Insert the genotypes 
                         for g,sample in zip(genos,cur_samples.values()):
                             GT = g.split(':')[GT_ind]
-                            genotypes.append((
+                            genotypes.append([
                                 file_id,
                                 var_id,
                                 sample,
                                 self._GT_to_flag(GT),
                                 self._GT_to_dosage(GT)
-                            ))
-            cur.executemany('''
-                INSERT INTO genotypes VALUES (?,?,?,?,?) 
-            ''',genotypes)
+                            ])
+            self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             cur.execute('RELEASE SAVEPOINT add_vcf')
-            elapsed = time.time() - start_time 
-            rate = int(len(genotypes) / elapsed)
-            print(f"Processed {line_id} variants ({rate}/second)")
 
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT add_vcf')
             cur.execute('RELEASE SAVEPOINT add_vcf')
             raise e
 
-    def to_VCF(self,filename, samples=None):
+    def to_VCF(self,filename, accessions=None):
         '''
             Outputs genotypes to a VCF file
 
@@ -182,24 +212,25 @@ class VarDab(Freezable):
             filename : string
                 outputs the VCF to the filename provided
         '''
+        
         genos = []
         tab = '\t'          # Line delimiter
-        cvar = None         # current var
+        cvar = None         # Current var
         with open(filename,'w') as OUT:
             print('##fileformat=VCFv4.1',file=OUT) 
-            print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join(self.samples)),file=OUT)
+            print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join(self.accessions)),file=OUT)
             # Iterate over the records 
             for record in self.genotypes(as_dataframe=False): 
-                if len(genos) > 0 and (cvar[0],cvar[1]) != (record[0],record[1]):
+                if len(genos) > 0 and cvar.varid != record.varid:
                     # Emit a line when you find a new variant
                     print(
                         "{}\t{}\t{}\t{}\t{}\t.\t.\t.\tGT\t{}".format(
-                            cvar[0],
-                            cvar[1],
-                            '.',
-                            cvar[2],
-                            cvar[3],
-                            '\t'.join([self._dosage_to_string(x[5]) for x in genos])
+                            cvar.chrom,
+                            cvar.pos,
+                            cvar.varid,
+                            cvar.ref,
+                            cvar.alt,
+                            '\t'.join([self._dosage_to_string(cvar.dosage) for x in genos])
                         ),
                         file=OUT
                     )
@@ -207,15 +238,15 @@ class VarDab(Freezable):
                 genos.append(record)
                 cvar = record 
             else:
-                #Prin   t out the last one
+                #Print out the last one
                 print(  
                     "{}\t{}\t{}\t{}\t{}\t.\t.\t.\tGT\t{}".format(
-                        cvar[0],
-                        cvar[1],
-                        cvar[2],
-                        cvar[3],
-                        cvar[4],
-                        '\t'.join([self._dosage_to_string(x[5]) for x in genos])
+                       cvar.chrom,
+                       cvar.pos,
+                       cvar.varid,
+                       cvar.ref,
+                       cvar.alt,
+                       '\t'.join([self._dosage_to_string(cvar.dosage) for x in genos])
                     ),
                     file=OUT
                 )
@@ -252,10 +283,13 @@ class VarDab(Freezable):
             return '0/0'
         elif dosage == 1:
             return '0/1'
-        else:
+        elif dosage == 2:
             return '1/1'
+        elif dosage == None:
+            return './.'
+        else:
+            raise ValueError(f'{dosage} could not be converted to a string')
 
-    
     @staticmethod
     def _GT_to_flag(alleles):
         flag = 0b0000000
@@ -267,7 +301,6 @@ class VarDab(Freezable):
             flag = flag | 0b00000010
         return int(flag)
         
-
     @staticmethod
     def _GT_to_dosage(alleles):
         alleles = alleles.replace('|','').replace('/','')
@@ -416,7 +449,7 @@ class VarDab(Freezable):
             PRIMARY KEY(FILEID,VARIANTID,SAMPLEID),
             FOREIGN KEY(FILEID) REFERENCES files(FILEID),
             FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID),
-            FOREIGN KEY(SAMPLEID) REFERENCES samples(SAMPLEID)
+            FOREIGN KEY(SAMPLEID) REFERENCES accessions(AID)
         ); 
         ''')
 
