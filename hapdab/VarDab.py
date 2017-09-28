@@ -24,14 +24,12 @@ class VarDab(Freezable):
         )
         self._initialize_tables()
 
-
     def conform(self, Fasta):
         '''
             Conform the Ref and Alt genotypes to a reference
             Fasta Object
         '''
         
-
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
             Returns genotypes from a list of samples
@@ -39,19 +37,25 @@ class VarDab(Freezable):
         
             Parameters
             ----------
-            samples : iterable of sample ids
+            accessions : iterable of accessions
 
             variants : an iterable of variants 
 
         '''
         query = 'SELECT * FROM sample_genotypes '
-
         if accessions != None:
-            cur_accessions = self.cohort.AID_mapping
-            AIDs = [cur_accessions[x] for x in accessions if x in cur_accessions]
-
+            # NOTE: This is susceptible to SQL Injection ...
+            names = [x.name for x in accessions] 
+            query += " WHERE name IN ('{}')".format("','".join(names))
+        if variants != None:
+            if 'WHERE' in query:
+                query += ' AND'
+            else:
+                query += ' WHERE'
+            ids = [x.id for x in variants]
+            query += " id IN ('{}')".format("','".join(ids))
         data = self._db.cursor().execute(
-            query
+            query 
         )
         if as_dataframe == True:
             data = pd.DataFrame(
@@ -161,7 +165,7 @@ class VarDab(Freezable):
             ''',genotypes)
             cur.execute('RELEASE SAVEPOINT add_vcf')
             elapsed = time.time() - start_time 
-            rate = int(100_000 / elapsed)
+            rate = int(len(genotypes) / elapsed)
             print(f"Processed {line_id} variants ({rate}/second)")
 
         except Exception as e:
@@ -441,6 +445,7 @@ class VarDab(Freezable):
         cur.execute(''' 
             CREATE TEMP VIEW sample_genotypes AS
             SELECT 
+             loci_alleles.id,
              chromosome,
              start,
              loci_alleles.rAllele,
@@ -450,7 +455,6 @@ class VarDab(Freezable):
              flag
             FROM genotypes 
             CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
-            -- CROSS JOIN loci.loci on genotypes.VARIANTID = loci.loci.rowid
             CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID
         ''')
     
