@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import time as time
+import logging
 from collections import namedtuple
 
 from minus80 import Freezable, Cohort, Accession
@@ -17,6 +18,15 @@ class VarDab(Freezable):
         'genoRecord',
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
     )
+
+    log = logging.getLogger(__name__)
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+                    '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
+                )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
 
 
     def __init__(self,name):
@@ -36,6 +46,7 @@ class VarDab(Freezable):
             Conform the Ref and Alt genotypes to a reference
             Fasta Object
         '''
+        raise NotImplementedError()
         
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
@@ -90,6 +101,18 @@ class VarDab(Freezable):
         return [ x[0] for x in self._db.cursor().execute(
             "SELECT name FROM accessions ORDER BY name"        
         ).fetchall()]
+    
+    @property
+    def num_files(self):
+        return self._db.cursor().execute(
+          'SELECT COUNT(DISTINCT(filename)) FROM files'  
+        ).fetchone()[0]
+
+    @property
+    def num_genotypes(self):
+        return self._db.cursor().execute(
+          'SELECT COUNT(*) FROM genotypes'       
+        ).fetchone()[0]
 
     @property
     def num_accessions(self):
@@ -111,10 +134,10 @@ class VarDab(Freezable):
                 "INSERT INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
                 item
             )
-            if item[0] == 'FORMAT' and item[1] == 'ID': 
-                cur.execute('INSERT OR IGNORE INTO format (format) VALUES (?)',(item[2],))
-            elif item[0] == 'INFO' and item[1] == 'ID':
-                cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
+            #if item[0] == 'FORMAT' and item[1] == 'ID': 
+            #    cur.execute('INSERT OR IGNORE INTO format (format) VALUES (?)',(item[2],))
+            #elif item[0] == 'INFO' and item[1] == 'ID':
+            #    cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
 
 
     def _dump_VCF_records_to_db(self,cur,variants,genotypes,start_time):
@@ -129,16 +152,17 @@ class VarDab(Freezable):
         for geno in genotypes:
             geno[1] = GID_map[geno[1]]
         cur.executemany('''
-            INSERT INTO genotypes VALUES (?,?,?,?,?) 
+            INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
         ''',genotypes)
         elapsed = time.time() - start_time 
-        rate = int(len(variants) / elapsed)
-        print(f"Processed {len(variants)} variants ({rate}/second)")
+        var_rate = int(len(variants) / elapsed)
+        geno_rate = int(len(genotypes) / elapsed)
+        self.log.info(f"Processed {len(variants)} variants ({var_rate}/second) containing {len(genotypes)} genotypes ({geno_rate}/second)")
         del genotypes[:]
         del variants[:]
-        start_time = time.time()
 
     def add_VCF(self, filename):
+        self.log.info(f'Importing genotypes from {filename}')
         cur = self._db.cursor()
         cur.execute('PRAGMA synchronous = off')
         cur.execute('PRAGMA journal_mode = memory')
@@ -157,6 +181,7 @@ class VarDab(Freezable):
                 for line_id,line in enumerate(IN):
                     if len(variants) >= 100_000:
                         self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
+                        start_time = time.time()
                     line = line.strip()
                     # Case 1: Header line
                     if line.startswith('##'):
@@ -188,15 +213,18 @@ class VarDab(Freezable):
                         # Insert the genotypes 
                         for g,sample in zip(genos,cur_samples.values()):
                             GT = g.split(':')[GT_ind]
-                            genotypes.append([
-                                file_id,
-                                var_id,
-                                sample,
-                                self._GT_to_flag(GT),
-                                self._GT_to_dosage(GT)
-                            ])
+                            dosage = self._GT_to_dosage(GT)
+                            if not np.isnan(dosage):
+                                genotypes.append([
+                                    file_id,
+                                    var_id,
+                                    sample,
+                                    self._GT_to_flag(GT),
+                                    dosage
+                                ])
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             cur.execute('RELEASE SAVEPOINT add_vcf')
+            self.log.info('Import Successful.')
 
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT add_vcf')
@@ -419,25 +447,6 @@ class VarDab(Freezable):
             info TEXT
         );
         ''')
-        # Variant Info
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS variant_info(
-            FILEID INTEGER,
-            INFOID INTEGER,
-            VARIANTID INTEGER,
-            value text,
-            FOREIGN KEY(FILEID) REFERENCES files(FILEID),
-            FOREIGN KEY(INFOID) REFERENCES info(INFOID),
-            FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID)
-        );
-        ''')
-        # FORMAT
-        cur.execute('''
-        CREATE TABLE IF NOT EXISTS format (
-            FMTID INTEGER PRIMARY KEY AUTOINCREMENT,
-            format TEXT UNIQUE
-        );
-        ''')
         # Genotypes
         cur.execute('''
         CREATE TABLE IF NOT EXISTS genotypes (
@@ -488,7 +497,7 @@ class VarDab(Freezable):
              flag
             FROM genotypes 
             CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
-            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID
+            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
         ''')
     
 
