@@ -134,11 +134,6 @@ class VarDab(Freezable):
                 "INSERT INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
                 item
             )
-            #if item[0] == 'FORMAT' and item[1] == 'ID': 
-            #    cur.execute('INSERT OR IGNORE INTO format (format) VALUES (?)',(item[2],))
-            #elif item[0] == 'INFO' and item[1] == 'ID':
-            #    cur.execute('INSERT OR IGNORE INTO info (info) VALUES (?)',(item[2],))
-
 
     def _dump_VCF_records_to_db(self,cur,variants,genotypes,start_time):
         '''
@@ -152,7 +147,7 @@ class VarDab(Freezable):
         for geno in genotypes:
             geno[1] = GID_map[geno[1]]
         cur.executemany('''
-            INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
+            INSERT INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
         ''',genotypes)
         elapsed = time.time() - start_time 
         var_rate = int(len(variants) / elapsed)
@@ -171,7 +166,7 @@ class VarDab(Freezable):
         try:
             # Add the filename to the Database
             cur.execute('''
-                INSERT OR IGNORE INTO files (filename) VALUES (?)
+                INSERT INTO files (filename) VALUES (?)
             ''',(filename,))
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
             # Iterate over the file and build the pieces of the database
@@ -206,7 +201,7 @@ class VarDab(Freezable):
                         var_id = variant.id
                         # Insert the observed QUAL score
                         cur.execute('''
-                            INSERT OR REPLACE INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
+                            INSERT INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
                         ''',(file_id,var_id,qual,fltr))
                         # Find the Genotype Field Index
                         GT_ind = fmt.split(':').index('GT')
@@ -474,13 +469,12 @@ class VarDab(Freezable):
                 ref.val AS rAllele, 
                 alt.val AS aAllele
             FROM loci
-            LEFT OUTER JOIN loci_attrs ref 
+            LEFT JOIN loci_attrs ref 
                 ON loci.id = ref.id 
                 AND ref.key = "ref" 
-            LEFT OUTER JOIN loci_attrs alt 
+            LEFT JOIN loci_attrs alt 
                 ON loci.id = alt.id 
                 AND alt.key = "alt"
-
         ''')
 
         # Create some views
