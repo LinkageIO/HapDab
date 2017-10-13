@@ -12,6 +12,17 @@ from hapdab.RawFile import RawFile
 
 from locuspocus import Locus,Loci
 
+
+log = logging.getLogger('VarDab')
+# Setup some logging information
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+                '%(asctime)s %(name)-8s %(levelname)-5s %(message)s'
+            )
+handler.setFormatter(formatter)
+log.addHandler(handler)
+log.setLevel(logging.INFO)
+
 class VarDab(Freezable):
 
     genoRecord = namedtuple(
@@ -19,17 +30,8 @@ class VarDab(Freezable):
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
     )
 
-    log = logging.getLogger(__name__)
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-                    '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
-                )
-    handler.setFormatter(formatter)
-    log.addHandler(handler)
-    log.setLevel(logging.INFO)
 
-
-    def __init__(self,name):
+    def __init__(self,name,fasta=None):
         super().__init__(name)
         self.loci = Loci(name+'.VarDab')     
         self._db.cursor().execute(
@@ -41,12 +43,79 @@ class VarDab(Freezable):
         )
         self._initialize_tables()
 
-    def conform(self, Fasta):
+    def conform(self, fasta):
         '''
-            Conform the Ref and Alt genotypes to a reference
-            Fasta Object
+            Conform the Ref genotype dosages to a reference
+            Fasta Object. This only works when the ALT allele 
+            matches the FASTA. This swaps the ALT and REF allele.
+
+            Parameters
+            ----------
+            fasta : a locuspocus.Fasta object
+                Each SNP's 'ref' attribute will be compared
+                to the position in fasta
+
+            Returns
+            -------
+            loci that were conformed
+
         '''
-        raise NotImplementedError()
+        offenders = []
+        for snp in self.loci:
+            # If the REF doesn't match the FASTA 
+            if snp['ref'].upper() != fasta[snp.chrom][snp.start].upper(): 
+                if snp['alt'].upper() == fasta[snp.chrom][snp.start].upper():
+                    offenders += [snp]
+        # Returns t
+        self._swap_locus_alt_dosage(offenders)
+        log.info(f'Conforming {len(offenders)} variants')
+        return offenders
+
+    def _swap_locus_alt_dosage(self,loci):
+        '''
+            Swaps the ALT and REF alleles for loci
+        '''
+        ids = [x.id for x in loci]
+        cur = self._db.cursor()
+        cur.execute('SAVEPOINT swap_dosage')
+        try:
+            cur.executemany('''
+                UPDATE genotypes SET dosage = 2 - dosage 
+                WHERE VARIANTID = (
+                    SELECT rowid FROM loci WHERE id = ?
+                )
+            ''',((x,) for x in ids))
+            genos_updated = self._db.changes()
+            # Get the alts and refs
+            refs = cur.executemany('''
+                SELECT val,id FROM loci_attrs WHERE id = ? AND key = 'ref'        
+            ''',((x,) for x in ids)).fetchall()
+            alts = cur.executemany('''
+                SELECT val,id FROM loci_attrs WHERE id = ? AND key = 'alt'        
+            ''',((x,) for x in ids)).fetchall()
+            # Swap ref and alt
+            cur.executemany('''
+                UPDATE loci_attrs SET val = ? WHERE id = ? AND key = 'ref'
+            ''', alts)
+            refs_updated = self._db.changes()
+            cur.executemany('''
+                UPDATE loci_attrs SET val = ? WHERE id = ? AND key = 'alt'
+            ''', refs)
+            alts_updated = self._db.changes()
+            # do some checks
+            assert refs_updated == alts_updated
+        except Exception as e:
+            cur.execute('ROLLBACK')
+            raise e
+        finally:
+            cur.execute('RELEASE SAVEPOINT swap_dosage')
+        # update the passed in loci so they match the database
+        for locus in loci:
+            new_alt = locus['ref']
+            new_ref = locus['alt']
+            locus['ref'] = new_ref
+            locus['alt'] = new_alt
+        
         
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
@@ -152,12 +221,12 @@ class VarDab(Freezable):
         elapsed = time.time() - start_time 
         var_rate = int(len(variants) / elapsed)
         geno_rate = int(len(genotypes) / elapsed)
-        self.log.info(f"Processed {len(variants)} variants ({var_rate}/second) containing {len(genotypes)} genotypes ({geno_rate}/second)")
+        log.info(f"Processed {len(variants)} variants ({var_rate}/second) containing {len(genotypes)} genotypes ({geno_rate}/second)")
         del genotypes[:]
         del variants[:]
 
     def add_VCF(self, filename):
-        self.log.info(f'Importing genotypes from {filename}')
+        log.info(f'Importing genotypes from {filename}')
         cur = self._db.cursor()
         cur.execute('PRAGMA synchronous = off')
         cur.execute('PRAGMA journal_mode = memory')
@@ -165,9 +234,12 @@ class VarDab(Freezable):
         start_time = time.time()
         try:
             # Add the filename to the Database
-            cur.execute('''
-                INSERT INTO files (filename) VALUES (?)
-            ''',(filename,))
+            try:
+                cur.execute('''
+                    INSERT INTO files (filename) VALUES (?)
+                ''',(filename,))
+            except ConstraintError as e:
+                log.warn()
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
             # Iterate over the file and build the pieces of the database
             with RawFile(filename) as IN:
@@ -219,7 +291,7 @@ class VarDab(Freezable):
                                 ])
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             cur.execute('RELEASE SAVEPOINT add_vcf')
-            self.log.info('Import Successful.')
+            log.info('Import Successful.')
 
         except Exception as e:
             cur.execute('ROLLBACK TO SAVEPOINT add_vcf')
