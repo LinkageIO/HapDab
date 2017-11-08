@@ -1,5 +1,4 @@
 # HapDab
-Dabbin on them Haplotypes
 
 ## Installation
 Installing HapDab takes two steps. Here we install HapDab into
