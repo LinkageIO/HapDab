@@ -1,6 +1,7 @@
 #!/bin/env python3
 
 import numpy as np
+import scipy.stats
 import pandas as pd
 import time as time
 import logging
@@ -10,7 +11,9 @@ from minus80 import Freezable, Cohort, Accession
 from itertools import chain,repeat
 from hapdab.RawFile import RawFile 
 
-from locuspocus import Locus,Loci
+from locuspocus import Locus,Loci,Fasta
+
+from apsw import ConstraintError
 
 
 log = logging.getLogger('VarDab')
@@ -23,6 +26,18 @@ handler.setFormatter(formatter)
 log.addHandler(handler)
 log.setLevel(logging.INFO)
 
+def HW_chi(n_AA,n_AB,n_BB):
+    '''
+        Calculates a chi-square for allele frequencies
+    '''
+    n = sum([n_AA,n_AB,n_BB])
+    p = (2*n_AA+n_AB)/(2*n)
+    q = 1-p
+    exp_AA = (p**2)*n
+    exp_AB = 2*p*q*n
+    exp_BB = (q**2)*n
+    return scipy.stats.chisquare([n_AA,n_AB,n_BB],[exp_AA,exp_AB,exp_BB],ddof=1).pvalue
+
 class VarDab(Freezable):
 
     genoRecord = namedtuple(
@@ -30,20 +45,77 @@ class VarDab(Freezable):
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
     )
 
+    genoVCF = namedtuple(
+        'genoVCF', # A genotype record from a VCF file 
+        ['fileid','varid','sampleid','flag','dosage']
+    )
+
 
     def __init__(self,name,fasta=None):
         super().__init__(name)
+        # Attach the Loci database
         self.loci = Loci(name+'.VarDab')     
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS loci;',(self.loci._dbfilename(),)
         )
+        # Attach the Cohort database
         self.cohort = Cohort(name+'.VarDab')
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS cohort;',(self.cohort._dbfilename(),)
         )
+        # Attach the fasta
+        if fasta is None:
+            # pull the stored fasta
+            try:
+                self.fasta = Fasta.from_minus80(self._dict('fasta'))
+            except ValueError as e:
+                raise ValueError(f'Provide a valied Fasta for {name}')
+        else:
+            fasta.to_minus80(name+'.VarDab')
+            self._dict('fasta',name+'.VarDab')
+            self.fasta = fasta
+        # Initialize the tables
         self._initialize_tables()
 
-    def conform(self, fasta):
+    def hw_disequilibrium(self, loci=None):
+        '''
+            Calculate Hardy Weinberg disequilibrium
+
+            Parameters
+            ----------
+            loci : an iterable of locuspocus.Locus
+                If not specified, will iterate over all
+                loci in the Vardab.
+
+            Returns
+            -------
+            A Dataframe with counts and chi square pvalues
+
+        '''
+        if loci == None:
+            loci = self.loci
+        cur = self._db.cursor()
+        allele_counts = cur.execute('''
+                SELECT id,dosage,COUNT(dosage) 
+                FROM genotypes 
+                JOIN loci ON VARIANTID = loci.rowid
+                GROUP BY id,dosage
+        ''').fetchall()
+        allele_counts = pd.DataFrame(
+                allele_counts,
+                columns=['id','allele','count']
+        )  
+        allele_counts = pd.pivot_table(
+            allele_counts,
+            index='id',
+            columns='allele',
+            values='count'
+        ).fillna(0)  
+        allele_counts.columns = ['AA','AB','BB']
+        allele_counts['pval'] = [HW_chi(x['AA'],x['AB'],x['BB']) for i,x in allele_counts.iterrows()] 
+        return allele_counts
+
+    def conform(self):
         '''
             Conform the Ref genotype dosages to a reference
             Fasta Object. This only works when the ALT allele 
@@ -51,9 +123,6 @@ class VarDab(Freezable):
 
             Parameters
             ----------
-            fasta : a locuspocus.Fasta object
-                Each SNP's 'ref' attribute will be compared
-                to the position in fasta
 
             Returns
             -------
@@ -66,56 +135,11 @@ class VarDab(Freezable):
             if snp['ref'].upper() != fasta[snp.chrom][snp.start].upper(): 
                 if snp['alt'].upper() == fasta[snp.chrom][snp.start].upper():
                     offenders += [snp]
-        # Returns t
+        # Returns the offenders
         self._swap_locus_alt_dosage(offenders)
         log.info(f'Conforming {len(offenders)} variants')
         return offenders
 
-    def _swap_locus_alt_dosage(self,loci):
-        '''
-            Swaps the ALT and REF alleles for loci
-        '''
-        ids = [x.id for x in loci]
-        cur = self._db.cursor()
-        cur.execute('SAVEPOINT swap_dosage')
-        try:
-            cur.executemany('''
-                UPDATE genotypes SET dosage = 2 - dosage 
-                WHERE VARIANTID = (
-                    SELECT rowid FROM loci WHERE id = ?
-                )
-            ''',((x,) for x in ids))
-            genos_updated = self._db.changes()
-            # Get the alts and refs
-            refs = cur.executemany('''
-                SELECT val,id FROM loci_attrs WHERE id = ? AND key = 'ref'        
-            ''',((x,) for x in ids)).fetchall()
-            alts = cur.executemany('''
-                SELECT val,id FROM loci_attrs WHERE id = ? AND key = 'alt'        
-            ''',((x,) for x in ids)).fetchall()
-            # Swap ref and alt
-            cur.executemany('''
-                UPDATE loci_attrs SET val = ? WHERE id = ? AND key = 'ref'
-            ''', alts)
-            refs_updated = self._db.changes()
-            cur.executemany('''
-                UPDATE loci_attrs SET val = ? WHERE id = ? AND key = 'alt'
-            ''', refs)
-            alts_updated = self._db.changes()
-            # do some checks
-            assert refs_updated == alts_updated
-        except Exception as e:
-            cur.execute('ROLLBACK')
-            raise e
-        finally:
-            cur.execute('RELEASE SAVEPOINT swap_dosage')
-        # update the passed in loci so they match the database
-        for locus in loci:
-            new_alt = locus['ref']
-            new_ref = locus['alt']
-            locus['ref'] = new_ref
-            locus['alt'] = new_alt
-        
         
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
@@ -174,8 +198,13 @@ class VarDab(Freezable):
     @property
     def num_files(self):
         return self._db.cursor().execute(
-          'SELECT COUNT(DISTINCT(filename)) FROM files'  
+            'SELECT COUNT(DISTINCT(filename)) FROM files'  
         ).fetchone()[0]
+
+    def files(self):
+        return [ x[0] for x in self._db.cursor().execute(
+            'SELECT filename FROM files'
+        ).fetchall()]
 
     @property
     def num_genotypes(self):
@@ -208,38 +237,69 @@ class VarDab(Freezable):
         '''
             A convenience method to add_VCF
         '''
+        # conform the variants to the reference fasta
+        variants_to_conform = set()
+        for var in variants:
+            true_ref = self.fasta[var.chrom][var.start].upper()
+            if var['ref'].upper() != true_ref:
+                if var['ref'].upper() ==  true_ref:
+                    log(f'{var.id} needed to be confmed')
+                    variants_to_conform.add(var.id)
+                    # Swap!
+                    var['ref'],var['alt'] = var['alt'],var['ref']
+
         self.loci.add_loci(variants)
         GID_map = {
             x.id : self.loci.rowid(x.id) for x in variants 
         }
         # swap out the IDS for the GIDS
         for geno in genotypes:
-            geno[1] = GID_map[geno[1]]
+            if geno.varid in variants_to_conform:
+                geno._replace(dosage=2-geno.dosage)
+            geno._replace(varid=GID_map[geno.varid])
         cur.executemany('''
             INSERT INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
         ''',genotypes)
+        
+        # Track the elapsed time for processing all this data
         elapsed = time.time() - start_time 
         var_rate = int(len(variants) / elapsed)
         geno_rate = int(len(genotypes) / elapsed)
         log.info(f"Processed {len(variants)} variants ({var_rate}/second) containing {len(genotypes)} genotypes ({geno_rate}/second)")
+        # Delete the processed variants and genotypes
         del genotypes[:]
         del variants[:]
 
     def add_VCF(self, filename):
+        '''
+            Adds variants from a VCF file to the database.
+
+            Parameters
+            ----------
+            filename : str
+                The VCF filename
+            fasta : a locuspocus Fasta object
+                Alleles will be conformed according to the reference
+                genotype in the fasta. This save TONS of headaches down
+                the line
+
+            Returns
+            -------
+            None if successful
+        '''
         log.info(f'Importing genotypes from {filename}')
-        cur = self._db.cursor()
-        cur.execute('PRAGMA synchronous = off')
-        cur.execute('PRAGMA journal_mode = memory')
-        cur.execute('SAVEPOINT add_vcf')
-        start_time = time.time()
-        try:
+        with self.bulk_transaction() as cur:
+            #cur.execute('PRAGMA synchronous = off')
+            cur.execute('PRAGMA journal_mode = memory')
+            start_time = time.time()
             # Add the filename to the Database
             try:
                 cur.execute('''
                     INSERT INTO files (filename) VALUES (?)
                 ''',(filename,))
             except ConstraintError as e:
-                log.warn()
+                log.warn(f'{filename} was already added.')
+                return
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
             # Iterate over the file and build the pieces of the database
             with RawFile(filename) as IN:
@@ -282,21 +342,15 @@ class VarDab(Freezable):
                             GT = g.split(':')[GT_ind]
                             dosage = self._GT_to_dosage(GT)
                             if not np.isnan(dosage):
-                                genotypes.append([
+                                genotypes.append(self.genoVCF(
                                     file_id,
                                     var_id,
                                     sample,
                                     self._GT_to_flag(GT),
                                     dosage
-                                ])
+                                ))
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
-            cur.execute('RELEASE SAVEPOINT add_vcf')
             log.info('Import Successful.')
-
-        except Exception as e:
-            cur.execute('ROLLBACK TO SAVEPOINT add_vcf')
-            cur.execute('RELEASE SAVEPOINT add_vcf')
-            raise e
 
     def to_VCF(self,filename, accessions=None):
         '''
@@ -527,6 +581,9 @@ class VarDab(Freezable):
             FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID),
             FOREIGN KEY(SAMPLEID) REFERENCES accessions(AID)
         ); 
+        CREATE INDEX IF NOT EXISTS genotype_VARIANTID ON genotypes (VARIANTID);
+        CREATE INDEX IF NOT EXISTS genotype_FILEID ON genotypes (FILEID);
+        CREATE INDEX IF NOT EXISTS genotype_SAMPLEID ON genotypes (SAMPLEID);
         ''')
 
         # Create a View where variants also have ref and alt alleles
@@ -566,4 +623,49 @@ class VarDab(Freezable):
             CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
         ''')
     
+
+    def _sqliteshell_debug(self):
+        '''
+            Print out the commands to recreate the database environment 
+            seen within this class from the command line. 
+        '''
+        print(f'''
+            rlwrap sqlite3 {self._dbfilename()}
+            ATTACH DATABASE "{self.loci._dbfilename()}" as loci;
+            ATTACH DATABASE "{self.cohort._dbfilename()}" as cohort;
+
+
+            CREATE TEMP VIEW loci_alleles AS
+            SELECT 
+                loci.rowid AID, 
+                loci.id, 
+                chromosome, 
+                start, 
+                end, 
+                ref.val AS rAllele, 
+                alt.val AS aAllele
+            FROM loci
+            LEFT JOIN loci_attrs ref 
+                ON loci.id = ref.id 
+                AND ref.key = "ref" 
+            LEFT JOIN loci_attrs alt 
+                ON loci.id = alt.id 
+                AND alt.key = "alt"
+
+
+            CREATE TEMP VIEW sample_genotypes AS
+            SELECT 
+             loci_alleles.id,
+             chromosome,
+             start,
+             loci_alleles.rAllele,
+             loci_alleles.aAllele,
+             cohort.accessions.name, 
+             dosage, 
+             flag
+            FROM genotypes 
+            CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
+            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
+        '''
+        )
 
