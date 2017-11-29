@@ -52,14 +52,17 @@ class VarDab(Freezable):
 
 
     def __init__(self,name,fasta=None):
+        '''
+            
+        '''
         super().__init__(name)
         # Attach the Loci database
-        self.loci = Loci(name+'.VarDab')     
+        self.loci = Loci(name)     
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS loci;',(self.loci._dbfilename(),)
         )
         # Attach the Cohort database
-        self.cohort = Cohort(name+'.VarDab')
+        self.cohort = Cohort(name)
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS cohort;',(self.cohort._dbfilename(),)
         )
@@ -71,8 +74,8 @@ class VarDab(Freezable):
             except ValueError as e:
                 raise ValueError(f'Provide a valied Fasta for {name}')
         else:
-            fasta.to_minus80(name+'.VarDab')
-            self._dict('fasta',name+'.VarDab')
+            fasta.to_minus80(name)
+            self._dict('fasta',name)
             self.fasta = fasta
         # Initialize the tables
         self._initialize_tables()
@@ -242,8 +245,8 @@ class VarDab(Freezable):
         for var in variants:
             true_ref = self.fasta[var.chrom][var.start].upper()
             if var['ref'].upper() != true_ref:
-                if var['ref'].upper() ==  true_ref:
-                    log(f'{var.id} needed to be confmed')
+                if var['alt'].upper() ==  true_ref:
+                    log.info(f'{var.id} needed to be confmed')
                     variants_to_conform.add(var.id)
                     # Swap!
                     var['ref'],var['alt'] = var['alt'],var['ref']
@@ -253,12 +256,14 @@ class VarDab(Freezable):
             x.id : self.loci.rowid(x.id) for x in variants 
         }
         # swap out the IDS for the GIDS
-        for geno in genotypes:
+        for i,geno in enumerate(genotypes):
             if geno.varid in variants_to_conform:
-                geno._replace(dosage=2-geno.dosage)
-            geno._replace(varid=GID_map[geno.varid])
+                # first update the dosage of the local variable geno
+                geno = geno._replace(dosage=2-geno.dosage)
+            # replace the original with the updated version
+            genotypes[i] = geno._replace(varid=GID_map[geno.varid])
         cur.executemany('''
-            INSERT INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
+            INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
         ''',genotypes)
         
         # Track the elapsed time for processing all this data
@@ -270,7 +275,7 @@ class VarDab(Freezable):
         del genotypes[:]
         del variants[:]
 
-    def add_VCF(self, filename):
+    def add_VCF(self, filename, force=False):
         '''
             Adds variants from a VCF file to the database.
 
@@ -299,7 +304,8 @@ class VarDab(Freezable):
                 ''',(filename,))
             except ConstraintError as e:
                 log.warn(f'{filename} was already added.')
-                return
+                if force == False:
+                    return
             file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
             # Iterate over the file and build the pieces of the database
             with RawFile(filename) as IN:
@@ -316,13 +322,13 @@ class VarDab(Freezable):
                         self._add_header(file_id,line_id,items,cur=cur)
                     # Case 2: Sample Line
                     elif line.startswith('#CHROM'):
-                        cur_samples = [Accession(name,files=[filename]) for name in line.split('\t')[9:]]
+                        cur_samples = [Accession(name,files=[filename]) for name in line.split()[9:]]
                         self.cohort.add_accessions(cur_samples)
                         cur_samples = self.cohort.AID_mapping
                     # Case 3: Genotypes
                     else:
                         # Split the line into its parts
-                        chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split('\t')
+                        chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split()
                         info = [field.split('=') for field in info.split(';')]
                         # Make a variant
                         variant = Locus(
@@ -333,7 +339,7 @@ class VarDab(Freezable):
                         var_id = variant.id
                         # Insert the observed QUAL score
                         cur.execute('''
-                            INSERT INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
+                            INSERT OR REPLACE INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
                         ''',(file_id,var_id,qual,fltr))
                         # Find the Genotype Field Index
                         GT_ind = fmt.split(':').index('GT')
