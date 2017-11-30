@@ -1,4 +1,6 @@
 # HapDab
+[![Build Status](https://travis-ci.org/LinkageIO/HapDab.svg?branch=master)](https://travis-ci.org/LinkageIO/HapDab)
+[![Coverage Status](https://coveralls.io/repos/github/LinkageIO/HapDab/badge.svg?branch=master)](https://coveralls.io/github/LinkageIO/HapDab?branch=master)
 
 ## Installation
 Installing HapDab takes two steps. Here we install HapDab into
