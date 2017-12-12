@@ -1,5 +1,6 @@
 import gzip
 import bz2
+import lzma
 
 class RawFile(object):
     def __init__(self,filename):
@@ -8,6 +9,8 @@ class RawFile(object):
             self.handle = gzip.open(filename,'rt')
         elif filename.endswith('bz2'):
             self.handle = bz2.open(filename,'rt')
+        elif filename.endswith('xz'):
+            self.handle = lzma.open(filenaem,'rt')
         else:
             self.handle = open(filename,'r')
     def __enter__(self):
