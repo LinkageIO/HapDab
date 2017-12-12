@@ -6,3 +6,6 @@ def test_VarDab_shape(IncreasingAF,IncreasingAFSwapRef):
 
 def test_IncreasingAF_Conforms(IncreasingAF,IncreasingAFSwapRef):
     assert all(IncreasingAF.genotypes(as_dataframe=True) == IncreasingAFSwapRef.genotypes(as_dataframe=True))
+
+def test_MissingGenotypes(MissingGenotypes):
+    assert True
