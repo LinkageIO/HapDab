@@ -5,7 +5,11 @@ import scipy.stats
 import pandas as pd
 import time as time
 import logging
+import pkg_resources
+import sys
+
 from collections import namedtuple
+from subprocess import Popen, PIPE
 
 from minus80 import Freezable, Cohort, Accession
 from itertools import chain,repeat
@@ -15,16 +19,18 @@ from locuspocus import Locus,Loci,Fasta
 
 from apsw import ConstraintError
 
-
 log = logging.getLogger('VarDab')
 # Setup some logging information
 handler = logging.StreamHandler()
 formatter = logging.Formatter(
-                '%(asctime)s %(name)-8s %(levelname)-5s %(message)s'
-            )
+            '%(asctime)s %(name)-8s %(levelname)-5s %(message)s'
+        )
 handler.setFormatter(formatter)
-log.addHandler(handler)
-log.setLevel(logging.INFO)
+if not len(log.handlers):
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
 
 def HW_chi(n_AA,n_AB,n_BB):
     '''
@@ -40,6 +46,9 @@ def HW_chi(n_AA,n_AB,n_BB):
 
 class VarDab(Freezable):
 
+    '''
+        A VarDab is not your parents variant database.
+    '''
     genoRecord = namedtuple(
         'genoRecord',
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
@@ -53,7 +62,17 @@ class VarDab(Freezable):
 
     def __init__(self,name,fasta=None):
         '''
-            
+            Initialize a database.
+
+            Parameters
+            ----------
+            name : str
+                The name of the database you are initializing
+
+            fasta : locuspocus.Fasta object
+                The reference sequence for the database you are
+                initializing. If you've build this database before
+                this option can be left blank (None).
         '''
         super().__init__(name)
         # Attach the Loci database
@@ -143,6 +162,37 @@ class VarDab(Freezable):
         log.info(f'Conforming {len(offenders)} variants')
         return offenders
 
+
+    def _call_beagle_phase(self,filename=None):
+        if filename == None:
+            tmp = self._tmpfile(suffix='.vcf',delete=False)
+            filename = tmp.name
+            # write the VCF to tmp file
+            log.info(f'Ouputting genotypes to VCF: {filename}...')
+            self.to_VCF(filename)
+            log.info("done")
+        # Get a temp file for the output
+        imputed_vcf = self._tmpfile(delete=False)
+        # Get the path of BEAGLE
+        beagle_path = pkg_resources.resource_filename(
+            'hapdab',
+            'include/beagle/beagle.08Jun17.d8b.jar'
+        )
+        # Create a command
+        cmd = f"java -jar {beagle_path} gt={filename} out=out"
+        try:
+            log.info(f'Phasing {filename} into {imputed_vcf.name}')
+            p = Popen(cmd, stdout=PIPE, stderr=sys.stderr, shell=True)
+            sout = p.communicate()[0]
+            p.wait()
+            if p.returncode == 0:
+                # Read in the results
+                import ipdb; ipdb.set_trace()
+                pass
+            else:
+                raise ValueError('BEAGLE failed to phase')
+        except FileNotFoundError as e:
+            raise e
         
     def genotypes(self,accessions=None,variants=None,as_dataframe=True):
         '''
@@ -275,6 +325,13 @@ class VarDab(Freezable):
         del genotypes[:]
         del variants[:]
 
+
+    async def async_add_VCF(self, filename):
+        '''
+            Asyncronous version of add_VCF
+        '''
+        pass
+
     def add_VCF(self, filename, force=False):
         '''
             Adds variants from a VCF file to the database.
@@ -358,7 +415,7 @@ class VarDab(Freezable):
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             log.info('Import Successful.')
 
-    def to_VCF(self,filename, accessions=None):
+    def to_VCF(self,filename, accessions=None, variants=None):
         '''
             Outputs genotypes to a VCF file
 
@@ -371,11 +428,19 @@ class VarDab(Freezable):
         genos = []
         tab = '\t'          # Line delimiter
         cvar = None         # Current var
+        if accessions is None:
+            accessions = self.accession
+        num_accessions = len(accessions)
         with open(filename,'w') as OUT:
             print('##fileformat=VCFv4.1',file=OUT) 
             print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join(self.accessions)),file=OUT)
             # Iterate over the records 
-            for record in self.genotypes(as_dataframe=False): 
+            genotypes = self.genotypes(
+                accessions=accessions,
+                variants=variants,
+                as_dataframe=False
+            )
+            for record in genotypes: 
                 if len(genos) > 0 and cvar.varid != record.varid:
                     # Emit a line when you find a new variant
                     print(
@@ -596,7 +661,7 @@ class VarDab(Freezable):
         cur.execute('''
             CREATE TEMP VIEW loci_alleles AS
             SELECT 
-                loci.rowid AID, 
+                loci.rowid as AID,
                 loci.id, 
                 chromosome, 
                 start, 
