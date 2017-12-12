@@ -54,7 +54,8 @@ setup(
     },
 
     package_data = {
-        '':['*.cyx']    
+        '':['*.cyx'],    
+        'beagle':'include/beagle/beagle.08Jun17.d8b.jar'
     },
     install_requires = [		
     ],
