@@ -24,3 +24,10 @@ def IncreasingAFSwapRef(ACGTFasta):
     x = dab.VarDab('PytestIncAFSwapRef',ACGTFasta)
     x.add_VCF('data/IncreasingACSwappedRef.vcf')
     return x
+
+@pytest.fixture(scope='module')
+def MissingGenotypes(ACGTFasta):
+    m80Tools.delete('PytestMissingGenotypes',force=True)
+    x = dab.VarDab('PytestMissingGenotypes',ACGTFasta)
+    x.add_VCF('data/MissingGenotypes.vcf')
+    return x
