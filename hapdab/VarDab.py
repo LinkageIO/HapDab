@@ -194,16 +194,16 @@ class VarDab(Freezable):
         except FileNotFoundError as e:
             raise e
         
-    def genotypes(self,accessions=None,variants=None,as_dataframe=True):
+    def genotypes(self,cohort=None,loci=None,as_dataframe=True):
         '''
-            Returns genotypes from a list of accessions
+            Returns genotypes from a list of cohort
             and a list of loci
         
             Parameters
             ----------
-            accessions : iterable of accessions
+            cohort : iterable of cohort
 
-            variants : an iterable of variants 
+            loci : an iterable of loci 
 
             Returns
             -------
@@ -214,18 +214,18 @@ class VarDab(Freezable):
         # Build the basic query
         query = 'SELECT * FROM sample_genotypes '
 
-        # add on options for accessions ...
-        if accessions != None:
+        # add on options for cohort ...
+        if cohort != None:
             # NOTE: This is susceptible to SQL Injection ...
-            names = [x.name for x in accessions] 
+            names = [x.name for x in cohort] 
             query += " WHERE name IN ('{}')".format("','".join(names))
-        # ... and variants
-        if variants != None:
+        # ... and loci
+        if loci != None:
             if 'WHERE' in query:
                 query += ' AND'
             else:
                 query += ' WHERE'
-            ids = [x.id for x in variants]
+            ids = [x.id for x in loci]
             query += " id IN ('{}')".format("','".join(ids))
         # Execute the query
         data = self._db.cursor().execute(
@@ -237,7 +237,7 @@ class VarDab(Freezable):
                 list(data),
                 columns = ['ID','chrom','pos','ref','alt','sample','dosage','flag']
             )
-            data['flag'] = [bin(x) for x in data['flag']]
+            #data['flag'] = [bin(x) for x in data['flag']]
         else:
             data = (self.genoRecord(*x) for x in data)
         return data
@@ -415,7 +415,7 @@ class VarDab(Freezable):
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             log.info('Import Successful.')
 
-    def to_VCF(self,filename, accessions=None, variants=None):
+    def to_VCF(self,filename, cohort=None, loci=None):
         '''
             Outputs genotypes to a VCF file
 
@@ -428,16 +428,16 @@ class VarDab(Freezable):
         genos = []
         tab = '\t'          # Line delimiter
         cvar = None         # Current var
-        if accessions is None:
-            accessions = self.accession
-        num_accessions = len(accessions)
+        if cohort is None:
+            cohort = self.cohort
+        num_accessions = len(cohort)
         with open(filename,'w') as OUT:
             print('##fileformat=VCFv4.1',file=OUT) 
-            print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join(self.accessions)),file=OUT)
+            print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join([x.name for x in cohort])),file=OUT)
             # Iterate over the records 
             genotypes = self.genotypes(
-                accessions=accessions,
-                variants=variants,
+                cohort=cohort,
+                loci=loci,
                 as_dataframe=False
             )
             for record in genotypes: 
@@ -649,7 +649,7 @@ class VarDab(Freezable):
             dosage FLOAT,  -- ALT Dosage
             PRIMARY KEY(FILEID,VARIANTID,SAMPLEID),
             FOREIGN KEY(FILEID) REFERENCES files(FILEID),
-            FOREIGN KEY(VARIANTID) REFERENCES variants(VARIANTID),
+            FOREIGN KEY(VARIANTID) REFERENCES loci(ROWID),
             FOREIGN KEY(SAMPLEID) REFERENCES accessions(AID)
         ); 
         CREATE INDEX IF NOT EXISTS genotype_VARIANTID ON genotypes (VARIANTID);
@@ -661,7 +661,7 @@ class VarDab(Freezable):
         cur.execute('''
             CREATE TEMP VIEW loci_alleles AS
             SELECT 
-                loci.rowid as AID,
+                loci.rowid as LID,
                 loci.id, 
                 chromosome, 
                 start, 
@@ -681,17 +681,19 @@ class VarDab(Freezable):
         cur.execute(''' 
             CREATE TEMP VIEW sample_genotypes AS
             SELECT 
-             loci_alleles.id,
-             chromosome,
-             start,
-             loci_alleles.rAllele,
-             loci_alleles.aAllele,
-             cohort.accessions.name, 
-             dosage, 
-             flag
-            FROM genotypes 
-            CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
-            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
+                LA.LID,
+                LA.chromosome,
+                LA.start,
+                LA.rAllele,
+                LA.aAllele,
+                A.name,
+                G.dosage,
+                G.flag
+            FROM loci_alleles LA 
+                CROSS JOIN accessions A 
+            LEFT OUTER JOIN genotypes G 
+                ON  LA.LID=VARIANTID 
+                AND A.AID=SAMPLEID;
         ''')
     
 
@@ -705,10 +707,9 @@ class VarDab(Freezable):
             ATTACH DATABASE "{self.loci._dbfilename()}" as loci;
             ATTACH DATABASE "{self.cohort._dbfilename()}" as cohort;
 
-
             CREATE TEMP VIEW loci_alleles AS
             SELECT 
-                loci.rowid AID, 
+                loci.rowid as LID,
                 loci.id, 
                 chromosome, 
                 start, 
@@ -721,8 +722,7 @@ class VarDab(Freezable):
                 AND ref.key = "ref" 
             LEFT JOIN loci_attrs alt 
                 ON loci.id = alt.id 
-                AND alt.key = "alt"
-
+                AND alt.key = "alt";
 
             CREATE TEMP VIEW sample_genotypes AS
             SELECT 
@@ -737,6 +737,7 @@ class VarDab(Freezable):
             FROM genotypes 
             CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
             CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
+
         '''
         )
 
