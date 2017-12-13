@@ -1,0 +1,15 @@
+##fileformat=VCFv4.0
+##source=PonyTools:v0.1.2
+##AxiomCallFiles=
+##FORMAT=<ID=GT,Number=1,Type=Integer,Description="Genotype">
+##FORMAT=<ID=GQ,Number=1,Type=Float,Description="Genotype quality">
+##INFO=<ID=MNEc,Number=0,Type=Flag,Description="Variant is a MNEc SNP">
+##INFO=<ID=axiomprobe,Number=1,Type=String,Description="Axiom Probe id for variant">
+##INFO=<ID=VQSLOD,Number=1,Type=Float,Description="Varaint Recalibrator Log Odds">
+#CHROM  POS  ID          REF     ALT     QUAL     FILTER  INFO     FORMAT  Sample1 Sample2 Sample3 Sample4 Sample5
+chr1    1    SNP1         A       C       40       PASS    .        GT:GQ   0/0:42  0/0:42  0/0:42  0/0:42  0/0:42
+chr1    20   SNP3         A       C       40       PASS    .        GT:GQ   0/0:42  0/0:42  0/0:42  0/0:42  ./.:42
+chr1    40   SNP5         A       C       40       PASS    .        GT:GQ   0/0:42  0/0:42  0/0:42  ./.:42  ./.:42
+chr1    60   SNP7         A       C       40       PASS    .        GT:GQ   0/0:42  0/0:42  ./.:42  ./.:42  ./.:42
+chr1    80   SNP9         A       C       40       PASS    .        GT:GQ   0/0:42  ./.:42  ./.:42  ./.:42  ./.:42
+chr1    90   SNP10        A       C       40       PASS    .        GT:GQ   ./.:42  ./.:42  ./.:42  ./.:42  ./.:42
