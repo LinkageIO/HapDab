@@ -143,39 +143,15 @@ class VarDab(Freezable):
         allele_counts['pval'] = [HW_chi(x['AA'],x['AB'],x['BB']) for i,x in allele_counts.iterrows()] 
         return allele_counts
 
-    def conform(self):
-        '''
-            Conform the Ref genotype dosages to a reference
-            Fasta Object. This only works when the ALT allele 
-            matches the FASTA. This swaps the ALT and REF allele.
 
-            Parameters
-            ----------
-
-            Returns
-            -------
-            loci that were conformed
-
-        '''
-        offenders = []
-        for snp in self.loci:
-            # If the REF doesn't match the FASTA 
-            if snp['ref'].upper() != fasta[snp.chrom][snp.start].upper(): 
-                if snp['alt'].upper() == fasta[snp.chrom][snp.start].upper():
-                    offenders += [snp]
-        # Returns the offenders
-        self._swap_locus_alt_dosage(offenders)
-        log.info(f'Conforming {len(offenders)} variants')
-        return offenders
-
-
-    def _call_beagle_phase(self,filename=None):
+    def _call_beagle_phase(self,loci=None,cohort=None,filename=None):
+        # If not filename, them create a temp file
         if filename == None:
             tmp = self._tmpfile(suffix='.vcf')
             filename = tmp.name
             # write the VCF to tmp file
             log.info(f'Ouputting genotypes to VCF: {filename}...')
-            self.to_VCF(filename)
+            self.to_VCF(filename,loci=loci,cohort=cohort)
             log.info("done")
         # Get a temp file for the output
         imputed_vcf = self._tmpfile(delete=False)
@@ -185,7 +161,7 @@ class VarDab(Freezable):
             'include/beagle/beagle.08Jun17.d8b.jar'
         )
         # Create a command
-        cmd = f"java -jar {beagle_path} gt={filename} out=out"
+        cmd = f"java -jar {beagle_path} gt={filename} out={imputed_vcf.name}"
         try:
             log.info(f'Phasing {filename} into {imputed_vcf.name}')
             p = Popen(cmd, stdout=PIPE, stderr=sys.stderr, shell=True)
@@ -217,26 +193,34 @@ class VarDab(Freezable):
             else an iterable of genoRecords (a named tuple)
 
         '''
+        # set default for cohort and loci
+        if cohort is None:
+            cohort = self.cohort
+        if loci is None:
+            loci = self.loci
         # Build the basic query
-        query = 'SELECT * FROM sample_genotypes '
+        cohort_ids = [x['AID'] for x in cohort]
+        data = []
+        for locus in loci:
+            lid = self.loci.LID(locus)
+            locus = self.VCFRecord(*self._db.cursor().execute('''
+                SELECT chromosome,start,id,rAllele,aAllele
+                FROM loci_alleles WHERE LID = ?
+            ''',(lid,)).fetchone())
+            genotypes = self._db.cursor().executemany('''
+                SELECT 
+                    CASE WHEN COUNT(dosage) > 0 
+                    THEN dosage 
+                    ELSE NULL 
+                    END 
+                AS dosage FROM genotypes 
+                WHERE VARIANTID = ? 
+                AND SAMPLEID = ?;
+            ''',product([lid],cohort_ids))
+            genos = [x[0] for x in genotypes.fetchall()]
+            data.append(list(locus)+genos)
+        return pd.DataFrame(data)   
 
-        # add on options for cohort ...
-        if cohort != None:
-            # NOTE: This is susceptible to SQL Injection ...
-            names = [x.name for x in cohort] 
-            query += " WHERE name IN ('{}')".format("','".join(names))
-        # ... and loci
-        if loci != None:
-            if 'WHERE' in query:
-                query += ' AND'
-            else:
-                query += ' WHERE'
-            ids = [x.id for x in loci]
-            query += " id IN ('{}')".format("','".join(ids))
-        # Execute the query
-        data = self._db.cursor().execute(
-            query 
-        )
         # Package up the results
         if as_dataframe == True:
             data = pd.DataFrame(
@@ -283,7 +267,8 @@ class VarDab(Freezable):
     def shape(self):
         return (self.num_snps,self.num_accessions)
 
-    def _add_header(self, file_id, line_id, items, cur=None):
+    def _add_VCF_header(self, file_id, line_id, line, cur=None):
+        items = self.parse_header(line)
         if cur == None:
             cur = self._db.cursor()
         for item in items:
@@ -331,7 +316,108 @@ class VarDab(Freezable):
         del genotypes[:]
         del variants[:]
 
+    def _add_VCF_filename(self,filename,cur=None):
+        '''
+            Helper method to add_VCF. Adds a filename to the
+            provided cursor.
+        '''
+        if cur is None:
+            cur = self._db.cursor()
+        try:
+           cur.execute('''
+                INSERT INTO files (filename) VALUES (?)
+            ''',(filename,))
+        except ConstraintError as e:
+            log.warn(f'{filename} was already added.')
+            if force == False:
+                return
+        file_id, = cur.execute(
+            'SELECT FILEID FROM files WHERE filename = ?;',
+            (filename,)
+        ).fetchone()
+        return file_id
 
+    def async_add_VCF(self,filename,force=False):
+        '''
+            Adds variants from a VCF file to the database.
+
+            Parameters
+            ----------
+            filename : str
+                The VCF filename
+            fasta : a locuspocus Fasta object
+                Alleles will be conformed according to the reference
+                genotype in the fasta. This save TONS of headaches down
+                the line
+
+            Returns
+            -------
+            None if successful
+        '''
+        # Create one task to read from file, and another to put into database
+        async def read_VCF_records(queue,filename,file_id,cur):
+            with open(filename,'r') as IN:
+                for i,line in enumerate(IN): 
+                    line = line.strip()
+                    if line.startswith('##')
+                        self._add_VCF_header(file_id,i,line,cur=cur)
+                    elif line.startswith('#CHROM'):
+                        cur_samples = self.cohort.add_accessions(
+                            [Accession(name,files=[filename]) for name in line.split()[9:]]
+                        )
+                        cur_AIDs = [x['AID'] for x in cur_samples]
+                        # The first thing on the queue is the AIDs
+                        await queue.put(cur_AIDs)
+                    else:
+                        chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split()
+                        info = [field.split('=') for field in info.split(';')]
+                        # Make a variant
+                        variant = Locus(
+                           chrom, pos,
+                           id=id, ref=ref, alt=alt,
+                           qual=qual
+                        )
+                        # Find the Genotype Field Index
+                        GT_ind = fmt.split(':').index('GT')
+                        # Insert the genotypes 
+                        def extract_genotype(x):
+                            GT = g.split(':')[GT_ind]
+                            flag,dosage = self._process_(GT)
+                        genos = [extract_genotype(x) for g in genos]
+                        await queue.put((locus,genos))
+            await queue.put((None,None))
+
+        async def add_VCF_records(queue,filename,file_id,cur):
+            AIDs = await queue.get()
+            recs = asyncio.Queue()
+            while True:
+                locus,genos = await queue.get()
+                if locus is None:
+                    break
+                # Put the item in the database
+                self.loci.add_locus(item)
+                LID = self.loci.LID(item)
+                if recs.qsize() >= 100000:
+                    cur.executemany('''
+                        INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
+                    ''',(x for x in recs.get()))
+                else:
+                    await queue.put((file_id,LID,A,F,D) for A,(F,D) in zip(AIDs,genos))
+
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue(loop=loop)
+        # use the APSW context manager -- NEAT!
+        with self._db as cur:
+            #cur.execute('PRAGMA synchronous = off')
+            cur.execute('PRAGMA journal_mode = wal')
+            # Add the filename to the Database
+            file_id = self._add_VCF_filename(filename,cur=cur)
+            prod = read_VCF_records(queue,filename,file_id,cur)
+            cons = add_VCF_records(queue,filename,file_id,cur)
+            loop.run_until_complete(asyncio.gather(prod,cons))
+            loop.close()
+
+    
     def add_VCF(self, filename, force=False):
         '''
             Adds variants from a VCF file to the database.
@@ -375,8 +461,7 @@ class VarDab(Freezable):
                     line = line.strip()
                     # Case 1: Header line
                     if line.startswith('##'):
-                        items = self.parse_header(line)
-                        self._add_header(file_id,line_id,items,cur=cur)
+                        self._add_VCF_header(file_id,line_id,line,cur=cur)
                     # Case 2: Sample Line
                     elif line.startswith('#CHROM'):
                         cur_samples = [Accession(name,files=[filename]) for name in line.split()[9:]]
@@ -416,17 +501,32 @@ class VarDab(Freezable):
             log.info('Import Successful.')
 
 
-    def async_to_VCF(self,filename,cohort=None,loci=None):
+    def to_VCF(self,filename,cohort=None,loci=None):
+        '''
+            Outputs genotypes to a VCF file
+
+            Parameters
+            ----------
+            filename : string
+                outputs the VCF to the filename provided
+            cohort : iterable of m80.Accessions
+                An iterable of the cohort that will
+                be sent to file
+            loci : iterable of locuspocus.Loci
+                An iterable of the loci that will be 
+                sent to file
+        '''
         if loci is None:
             loci = self.loci
         if cohort is None:
             cohort = self.cohort
+        loci.sort()
         # Get loci ids
         async def produce_records(queue,loci,cohort):
             cohort_ids = [x['AID'] for x in cohort]
             # Iterate and produce records
             for locus in loci:
-                lid = sorted(self.loci.LID(locus))
+                lid = self.loci.LID(locus)
                 locus = self.VCFRecord(*self._db.cursor().execute('''
                     SELECT chromosome,start,id,rAllele,aAllele
                     FROM loci_alleles WHERE LID = ?
@@ -441,11 +541,18 @@ class VarDab(Freezable):
                     WHERE VARIANTID = ? 
                     AND SAMPLEID = ?;
                 ''',product([lid],cohort_ids))
-                await queue.put((locus,genotypes.fetchall()))
+                genos = genotypes.fetchall()
+                genos = [self._dosage_to_string(x[0]) for x in genos]
+                await queue.put((locus,genos))
             await queue.put((None,None))
 
         async def consume_records(queue):
-            with open(filename,'w') as OUT:
+            with open(filename,mode='w') as OUT:
+                print('##fileformat=VCFv4.1',file=OUT) 
+                print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format(
+                    '\t'.join([x.name for x in cohort]
+                    )
+                ),file=OUT)
                 while True:            
                     (locus,genos) = await queue.get()
                     if locus is None:
@@ -456,7 +563,7 @@ class VarDab(Freezable):
                             locus.id,
                             locus.ref,
                             locus.alt,
-                            '\t'.join([self._dosage_to_string(x[0]) for x in genos])
+                            '\t'.join(genos)
                         ),file=OUT)
 
         loop = asyncio.get_event_loop()
@@ -465,63 +572,7 @@ class VarDab(Freezable):
         prod = produce_records(queue,loci,cohort)
         cons = consume_records(queue)
         loop.run_until_complete(asyncio.gather(prod,cons))
-        loop.close
-
-    def to_VCF(self,filename, cohort=None, loci=None):
-        '''
-            Outputs genotypes to a VCF file
-
-            Parameters
-            ----------
-            filename : string
-                outputs the VCF to the filename provided
-        '''
-       
-        genos = []
-        tab = '\t'          # Line delimiter
-        cvar = None         # Current var
-        if cohort is None:
-            cohort = self.cohort
-        num_accessions = len(cohort)
-        with open(filename,'w') as OUT:
-            print('##fileformat=VCFv4.1',file=OUT) 
-            print("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}".format('\t'.join([x.name for x in cohort])),file=OUT)
-            # Iterate over the records 
-            genotypes = self.genotypes(
-                cohort=cohort,
-                loci=loci,
-                as_dataframe=False
-            )
-            for record in genotypes: 
-                if len(genos) > 0 and cvar.varid != record.varid:
-                    # Emit a line when you find a new variant
-                    print(
-                        "{}\t{}\t{}\t{}\t{}\t.\t.\t.\tGT\t{}".format(
-                            cvar.chrom,
-                            cvar.pos,
-                            cvar.varid,
-                            cvar.ref,
-                            cvar.alt,
-                            '\t'.join([self._dosage_to_string(x.dosage) for x in genos])
-                        ),
-                        file=OUT
-                    )
-                    genos = []
-                genos.append(record)
-                cvar = record 
-            else:
-                #Print out the last one
-                print(  
-                    "{}\t{}\t{}\t{}\t{}\t.\t.\t.\tGT\t{}".format(
-                       cvar.chrom,
-                       cvar.pos,
-                       cvar.varid,
-                       cvar.ref,
-                       cvar.alt,
-                       '\t'.join([self._dosage_to_string(cvar.dosage) for x in genos])
-                    ),
-                    file=OUT
-                )
+        loop.close()
 
     def _drop_tables(self):
         tables = [x[0] for x in self._db.cursor().execute(
@@ -586,6 +637,27 @@ class VarDab(Freezable):
             return 2.0
         else:
             return np.nan
+    @staticmethod
+    def _process_GT(alleles):
+        flag = 0b0000000
+        # Phased
+        if '|' in alleles:
+            flag = flag | 0b00000001
+        # Heterozygous and 1|0
+        if alleles == '1|0':
+            flag = flag | 0b00000010
+        alleles = alleles.replace('|','').replace('/','')
+        if '.' in alleles:
+            dosapge = np.nan
+        elif alleles == '00':
+            dosage = 0.0
+        elif alleles == '01' or alleles == '10':
+            dosage = 1.0
+        elif alleles == '11':
+            dosage = 2.0
+        else:
+            dosage = np.nan
+        return (flag,dosage)
 
     @staticmethod
     def _flag_is_phased(flag):
