@@ -7,12 +7,13 @@ import time as time
 import logging
 import pkg_resources
 import sys
+import asyncio
 
 from collections import namedtuple
 from subprocess import Popen, PIPE
 
 from minus80 import Freezable, Cohort, Accession
-from itertools import chain,repeat
+from itertools import chain,repeat,product
 from hapdab.RawFile import RawFile 
 
 from locuspocus import Locus,Loci,Fasta
@@ -52,6 +53,11 @@ class VarDab(Freezable):
     genoRecord = namedtuple(
         'genoRecord',
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
+    )
+
+    VCFRecord = namedtuple(
+        'VCFRecord',
+        ['chrom','start','id','ref','alt']
     )
 
     genoVCF = namedtuple(
@@ -165,7 +171,7 @@ class VarDab(Freezable):
 
     def _call_beagle_phase(self,filename=None):
         if filename == None:
-            tmp = self._tmpfile(suffix='.vcf',delete=False)
+            tmp = self._tmpfile(suffix='.vcf')
             filename = tmp.name
             # write the VCF to tmp file
             log.info(f'Ouputting genotypes to VCF: {filename}...')
@@ -326,12 +332,6 @@ class VarDab(Freezable):
         del variants[:]
 
 
-    async def async_add_VCF(self, filename):
-        '''
-            Asyncronous version of add_VCF
-        '''
-        pass
-
     def add_VCF(self, filename, force=False):
         '''
             Adds variants from a VCF file to the database.
@@ -415,6 +415,58 @@ class VarDab(Freezable):
             self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
             log.info('Import Successful.')
 
+
+    def async_to_VCF(self,filename,cohort=None,loci=None):
+        if loci is None:
+            loci = self.loci
+        if cohort is None:
+            cohort = self.cohort
+        # Get loci ids
+        async def produce_records(queue,loci,cohort):
+            cohort_ids = [x['AID'] for x in cohort]
+            # Iterate and produce records
+            for locus in loci:
+                lid = sorted(self.loci.LID(locus))
+                locus = self.VCFRecord(*self._db.cursor().execute('''
+                    SELECT chromosome,start,id,rAllele,aAllele
+                    FROM loci_alleles WHERE LID = ?
+                ''',(lid,)).fetchone())
+                genotypes = self._db.cursor().executemany('''
+                    SELECT 
+                        CASE WHEN COUNT(dosage) > 0 
+                        THEN dosage 
+                        ELSE NULL 
+                        END 
+                    AS dosage FROM genotypes 
+                    WHERE VARIANTID = ? 
+                    AND SAMPLEID = ?;
+                ''',product([lid],cohort_ids))
+                await queue.put((locus,genotypes.fetchall()))
+            await queue.put((None,None))
+
+        async def consume_records(queue):
+            with open(filename,'w') as OUT:
+                while True:            
+                    (locus,genos) = await queue.get()
+                    if locus is None:
+                        break
+                    print("{}\t{}\t{}\t{}\t{}\t.\t.\t.\tGT\t{}".format(
+                            locus.chrom,
+                            locus.start,
+                            locus.id,
+                            locus.ref,
+                            locus.alt,
+                            '\t'.join([self._dosage_to_string(x[0]) for x in genos])
+                        ),file=OUT)
+
+        loop = asyncio.get_event_loop()
+        queue = asyncio.Queue(loop=loop)
+        # Create some tasks
+        prod = produce_records(queue,loci,cohort)
+        cons = consume_records(queue)
+        loop.run_until_complete(asyncio.gather(prod,cons))
+        loop.close
+
     def to_VCF(self,filename, cohort=None, loci=None):
         '''
             Outputs genotypes to a VCF file
@@ -424,7 +476,7 @@ class VarDab(Freezable):
             filename : string
                 outputs the VCF to the filename provided
         '''
-        
+       
         genos = []
         tab = '\t'          # Line delimiter
         cvar = None         # Current var
@@ -450,7 +502,7 @@ class VarDab(Freezable):
                             cvar.varid,
                             cvar.ref,
                             cvar.alt,
-                            '\t'.join([self._dosage_to_string(cvar.dosage) for x in genos])
+                            '\t'.join([self._dosage_to_string(x.dosage) for x in genos])
                         ),
                         file=OUT
                     )
@@ -499,11 +551,11 @@ class VarDab(Freezable):
 
     @staticmethod
     def _dosage_to_string(dosage):
-        if dosage == 0:
+        if dosage == 0.0:
             return '0/0'
-        elif dosage == 1:
+        elif dosage == 1.0:
             return '0/1'
-        elif dosage == 2:
+        elif dosage == 2.0:
             return '1/1'
         elif dosage == None:
             return './.'
@@ -601,6 +653,7 @@ class VarDab(Freezable):
 
     def _initialize_tables(self):
         cur = self._db.cursor()
+        self._schema = []
         # Files -- Meta Data
         cur.execute('''
         CREATE TABLE IF NOT EXISTS files (
@@ -653,6 +706,7 @@ class VarDab(Freezable):
             FOREIGN KEY(SAMPLEID) REFERENCES accessions(AID)
         ); 
         CREATE INDEX IF NOT EXISTS genotype_VARIANTID ON genotypes (VARIANTID);
+        CREATE INDEX IF NOT EXISTS genotype_SAMPLE_VARIANT on genotypes (VARIANTID,SAMPLEID);
         CREATE INDEX IF NOT EXISTS genotype_FILEID ON genotypes (FILEID);
         CREATE INDEX IF NOT EXISTS genotype_SAMPLEID ON genotypes (SAMPLEID);
         ''')
@@ -726,18 +780,18 @@ class VarDab(Freezable):
 
             CREATE TEMP VIEW sample_genotypes AS
             SELECT 
-             loci_alleles.id,
-             chromosome,
-             start,
-             loci_alleles.rAllele,
-             loci_alleles.aAllele,
-             cohort.accessions.name, 
-             dosage, 
-             flag
-            FROM genotypes 
-            CROSS JOIN loci_alleles on genotypes.VARIANTID = loci_alleles.AID
-            CROSS JOIN cohort.accessions on genotypes.SAMPLEID = cohort.accessions.AID;
-
+                LA.LID,
+                LA.chromosome,
+                LA.start,
+                LA.rAllele,
+                LA.aAllele,
+                A.name,
+                G.dosage,
+                G.flag
+            FROM loci_alleles LA 
+                CROSS JOIN accessions A 
+            LEFT OUTER JOIN genotypes G 
+                ON  LA.LID=VARIANTID 
+                AND A.AID=SAMPLEID;
         '''
         )
-
