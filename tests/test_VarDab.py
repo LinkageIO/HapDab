@@ -5,11 +5,19 @@ def test_VarDab_shape(IncreasingAF,IncreasingAFSwapRef):
 
 
 def test_IncreasingAF_Conforms(IncreasingAF,IncreasingAFSwapRef):
-    assert all(IncreasingAF.genotypes(as_dataframe=True) == IncreasingAFSwapRef.genotypes(as_dataframe=True))
+    x = IncreasingAF.genotypes(as_dataframe=True)
+    y = IncreasingAFSwapRef.genotypes(as_dataframe=True)
+    z = x == y
+    z = z.all()
+    z = z.all()
+    assert z
 
 def test_MissingGenotypes(MissingGenotypes):
     x = MissingGenotypes
-    assert len(x.genotypes()) == len(x.cohort) * len(x.loci)
+    (nrows,ncol) = x.genotypes().shape
+    ncohort = ncol - len(['chr','pos','id','alt','red'])
+    nloci = nrows
+    assert (ncohort == len(x.cohort)) and (nloci == len(x.loci))
 
 def test_MissingGenotypesCountNotCrossJoin(MissingGenotypes):
     x = MissingGenotypes
