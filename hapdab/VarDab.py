@@ -11,14 +11,15 @@ import asyncio
 
 from collections import namedtuple
 from subprocess import Popen, PIPE
+from apsw import ConstraintError
 
+# Linkage Imports
 from minus80 import Freezable, Cohort, Accession
 from itertools import chain,repeat,product
-from hapdab.RawFile import RawFile 
-
 from locuspocus import Locus,Loci,Fasta
 
-from apsw import ConstraintError
+# Internal Imports
+from .RawFile import RawFile 
 
 log = logging.getLogger('VarDab')
 # Setup some logging information
@@ -32,10 +33,13 @@ if not len(log.handlers):
     log.setLevel(logging.INFO)
 
 
-
 def HW_chi(n_AA,n_AB,n_BB):
     '''
-        Calculates a chi-square for allele frequencies
+        Calculates a chi-square for allele frequencies.
+
+        This is the canonoical calculation for HardyWeinberg 
+        disequilibrium tell you in allele frequencies are
+        likely constant between generations.
     '''
     n = sum([n_AA,n_AB,n_BB])
     p = (2*n_AA+n_AB)/(2*n)
@@ -43,13 +47,20 @@ def HW_chi(n_AA,n_AB,n_BB):
     exp_AA = (p**2)*n
     exp_AB = 2*p*q*n
     exp_BB = (q**2)*n
-    return scipy.stats.chisquare([n_AA,n_AB,n_BB],[exp_AA,exp_AB,exp_BB],ddof=1).pvalue
+    return scipy.stats.chisquare(
+            [n_AA,n_AB,n_BB],
+            [exp_AA,exp_AB,exp_BB],
+            ddof=1
+           ).pvalue
 
 class VarDab(Freezable):
 
     '''
         A VarDab is not your parents variant database.
     '''
+
+    # Class variables holding records for various tuples generated
+    # by VarDab
     genoRecord = namedtuple(
         'genoRecord',
         ['varid','chrom','pos','ref','alt','sample','dosage','flag']
@@ -122,13 +133,15 @@ class VarDab(Freezable):
         '''
         if loci == None:
             loci = self.loci
+        LIDS = [self.loci.LID(x) for x in loci]
         cur = self._db.cursor()
-        allele_counts = cur.execute('''
+        allele_counts = cur.executemany('''
                 SELECT id,dosage,COUNT(dosage) 
                 FROM genotypes 
                 JOIN loci ON VARIANTID = loci.rowid
+                WHERE loci.rowid  = ?
                 GROUP BY id,dosage
-        ''').fetchall()
+        ''',((x,) for x in LIDS)).fetchall()
         allele_counts = pd.DataFrame(
                 allele_counts,
                 columns=['id','allele','count']
@@ -294,7 +307,7 @@ class VarDab(Freezable):
 
         self.loci.add_loci(variants)
         GID_map = {
-            x.id : self.loci.rowid(x.id) for x in variants 
+            x.id : self.loci.LID(x.id) for x in variants 
         }
         # swap out the IDS for the GIDS
         for i,geno in enumerate(genotypes):
@@ -356,10 +369,10 @@ class VarDab(Freezable):
         '''
         # Create one task to read from file, and another to put into database
         async def read_VCF_records(queue,filename,file_id,cur):
-            with open(filename,'r') as IN:
+            with RawFile(filename,'r') as IN:
                 for i,line in enumerate(IN): 
                     line = line.strip()
-                    if line.startswith('##')
+                    if line.startswith('##'):
                         self._add_VCF_header(file_id,i,line,cur=cur)
                     elif line.startswith('#CHROM'):
                         cur_samples = self.cohort.add_accessions(
@@ -380,11 +393,11 @@ class VarDab(Freezable):
                         # Find the Genotype Field Index
                         GT_ind = fmt.split(':').index('GT')
                         # Insert the genotypes 
-                        def extract_genotype(x):
+                        def extract_genotype(g):
                             GT = g.split(':')[GT_ind]
-                            flag,dosage = self._process_(GT)
-                        genos = [extract_genotype(x) for g in genos]
-                        await queue.put((locus,genos))
+                            flag,dosage = self._process_GT(GT)
+                        genos = [extract_genotype(g) for g in genos]
+                        await queue.put((variant,genos))
             await queue.put((None,None))
 
         async def add_VCF_records(queue,filename,file_id,cur):
@@ -395,8 +408,8 @@ class VarDab(Freezable):
                 if locus is None:
                     break
                 # Put the item in the database
-                self.loci.add_locus(item)
-                LID = self.loci.LID(item)
+                self.loci.add_locus(locus)
+                LID = self.loci.LID(locus)
                 if recs.qsize() >= 100000:
                     cur.executemany('''
                         INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
@@ -407,9 +420,10 @@ class VarDab(Freezable):
         loop = asyncio.get_event_loop()
         queue = asyncio.Queue(loop=loop)
         # use the APSW context manager -- NEAT!
-        with self._db as cur:
+        with self._db as db:
+            cur = db.cursor()
             #cur.execute('PRAGMA synchronous = off')
-            cur.execute('PRAGMA journal_mode = wal')
+            cur.execute('PRAGMA journal_mode = memory')
             # Add the filename to the Database
             file_id = self._add_VCF_filename(filename,cur=cur)
             prod = read_VCF_records(queue,filename,file_id,cur)
@@ -648,7 +662,7 @@ class VarDab(Freezable):
             flag = flag | 0b00000010
         alleles = alleles.replace('|','').replace('/','')
         if '.' in alleles:
-            dosapge = np.nan
+            dosage = np.nan
         elif alleles == '00':
             dosage = 0.0
         elif alleles == '01' or alleles == '10':
