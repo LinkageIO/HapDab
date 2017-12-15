@@ -5,3 +5,4 @@ coveralls>=1.2.0
 pandas>=0.20
 cython>=0.16
 numpy>=1.9
+aiofiles>=0.3.1
