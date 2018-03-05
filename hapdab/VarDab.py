@@ -8,10 +8,13 @@ import logging
 import pkg_resources
 import sys
 import asyncio
+import concurrent
 
+from pysam import VariantFile
 from collections import namedtuple
 from subprocess import Popen, PIPE
 from apsw import ConstraintError
+from contextlib import contextmanager
 
 # Linkage Imports
 from minus80 import Freezable, Cohort, Accession
@@ -53,6 +56,27 @@ def HW_chi(n_AA,n_AB,n_BB):
             ddof=1
            ).pvalue
 
+
+def timed(method):
+    def timed_dec(*args, **kwargs):
+        start = time.time()
+        result = method(*args,**kwargs)
+        end = time.time()
+        elap = end - start
+
+        units = ['days','hours','minutes','seconds']
+        days = elap // 86400
+        hours = elap // 3600 % 24
+        minutes = elap // 60 % 60
+        seconds = elap % 60
+        elap = [f"{e}:{u}" for e,u in filter(lambda x: x[0], zip([days,hours,minutes,seconds],units))]
+        if len(elap) == 0:
+            print('Took less than a second')
+        else:
+            print("Took: " + ','.join(elap))
+        return result
+    return timed_dec
+
 class VarDab(Freezable):
 
     '''
@@ -75,7 +99,6 @@ class VarDab(Freezable):
         'genoVCF', # A genotype record from a VCF file 
         ['fileid','varid','sampleid','flag','dosage']
     )
-
 
     def __init__(self,name,fasta=None):
         '''
@@ -106,12 +129,12 @@ class VarDab(Freezable):
         if fasta is None:
             # pull the stored fasta
             try:
-                self.fasta = Fasta.from_minus80(self._dict('fasta'))
+                fasta_name = self._dict('fasta')
+                self.fasta = Fasta(fasta_name)
             except ValueError as e:
                 raise ValueError(f'Provide a valied Fasta for {name}')
         else:
-            fasta.to_minus80(name)
-            self._dict('fasta',name)
+            self._dict('fasta',fasta._m80_name)
             self.fasta = fasta
         # Initialize the tables
         self._initialize_tables()
@@ -280,56 +303,88 @@ class VarDab(Freezable):
     def shape(self):
         return (self.num_snps,self.num_accessions)
 
-    def _add_VCF_header(self, file_id, line_id, line, cur=None):
+    def _add_VCF_header(self, file_id, line_id, line, cur=None,force=False):
         items = self.parse_header(line)
         if cur == None:
             cur = self._db.cursor()
         for item in items:
             cur.execute(
-                "INSERT INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
+                "INSERT OR REPLACE INTO headers VALUES ({},{},?,?,?)".format(file_id,line_id),
                 item
             )
 
-    def _dump_VCF_records_to_db(self,cur,variants,genotypes,start_time):
+   
+    def add_VCF(self, filename, force=False):
         '''
-            A convenience method to add_VCF
+            Adds variants from a VCF file to the database.
+
+            Parameters
+            ----------
+            filename : str
+                The VCF filename
+
+            Returns
+            -------
+            None if successful
         '''
-        # conform the variants to the reference fasta
-        variants_to_conform = set()
-        for var in variants:
-            true_ref = self.fasta[var.chrom][var.start].upper()
-            if var['ref'].upper() != true_ref:
-                if var['alt'].upper() ==  true_ref:
-                    log.info(f'{var.id} needed to be confmed')
-                    variants_to_conform.add(var.id)
-                    # Swap!
-                    var['ref'],var['alt'] = var['alt'],var['ref']
+        log.info(f'Importing genotypes from {filename}')
+        with self.bulk_transaction() as cur, self.suspend_sqlite_indices():
+            cur.execute('PRAGMA journal_mode = memory')
+            # Add the filename to the Database
+            FID = self._add_VCF_filename(filename,cur=cur)
+            # Iterate over the file and build the pieces of the database
+            variants = []
+            genotypes = []
+            vfile = VariantFile(filename)
+            # Handle Accessions
+            sample_names = list(vfile.header.samples)
+            cur_samples = [Accession(name,files=[filename]) for name in sample_names]
+            self.cohort.add_accessions(cur_samples)
+            # Genotype
+            genotypes = []
+            variants = []
+            for line_id,rec in enumerate(vfile):
+                if len(rec.alts) > 1:
+                    log.warn(f'{rec.chrom}:{rec.pos} is not bi-allelic')
+                else:
+                    if self.fasta[rec.chrom][rec.pos].upper() != rec.ref.upper():
+                        ref = rec.alts[0]
+                        alt = rec.ref
+                        conform = True
+                    else:
+                        ref = rec.ref
+                        alt = rec.alts[0]
+                        conform = False
+                    variant = Locus(
+                       rec.chrom, rec.pos,
+                       id=rec.id, ref=rec.ref, alt=rec.alts[0],
+                    )
+                    variants.append(variant)
+                    #LID = line_id # self.loci.add_locus(variant)
+                    #cur.execute('''
+                    #    INSERT OR REPLACE INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
+                    #''',(FID,LID,rec.qual,'PASS'))
+                    dosages = []
+                    for i,alleles in enumerate(rec.samples.values()):
+                        if None in alleles.allele_indices:
+                            continue
+                        dose = int(sum(alleles.allele_indices))
+                        if conform:
+                            dose = 2 - dose
+                        AID = self.cohort._get_AID(sample_names[i])
+                        dosages.append((FID,AID,0,dose))
+                    genotypes.append(dosages)
 
-        self.loci.add_loci(variants)
-        GID_map = {
-            x.id : self.loci.LID(x.id) for x in variants 
-        }
-        # swap out the IDS for the GIDS
-        for i,geno in enumerate(genotypes):
-            if geno.varid in variants_to_conform:
-                # first update the dosage of the local variable geno
-                geno = geno._replace(dosage=2-geno.dosage)
-            # replace the original with the updated version
-            genotypes[i] = geno._replace(varid=GID_map[geno.varid])
-        cur.executemany('''
-            INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
-        ''',genotypes)
-        
-        # Track the elapsed time for processing all this data
-        elapsed = time.time() - start_time 
-        var_rate = int(len(variants) / elapsed)
-        geno_rate = int(len(genotypes) / elapsed)
-        log.info(f"Processed {len(variants)} variants ({var_rate}/second) containing {len(genotypes)} genotypes ({geno_rate}/second)")
-        # Delete the processed variants and genotypes
-        del genotypes[:]
-        del variants[:]
+            # Take care of the database
+            self.loci.add_loci(variants)
+            LIDs = [self.loci.LID(x) for x in variants ]
+            cur.executemany('''
+                INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
+            ''',((FID,LID,AID,flag,dose) for LID,row in zip(LIDs,genotypes) for FID,AID,flag,dose in row))
 
-    def _add_VCF_filename(self,filename,cur=None):
+            log.info('Import Successful.')
+
+    def _add_VCF_filename(self,filename,cur=None,force=False):
         '''
             Helper method to add_VCF. Adds a filename to the
             provided cursor.
@@ -343,177 +398,12 @@ class VarDab(Freezable):
         except ConstraintError as e:
             log.warn(f'{filename} was already added.')
             if force == False:
-                return
+                pass
         file_id, = cur.execute(
             'SELECT FILEID FROM files WHERE filename = ?;',
             (filename,)
         ).fetchone()
         return file_id
-
-    def async_add_VCF(self,filename,force=False):
-        '''
-            Adds variants from a VCF file to the database.
-
-            Parameters
-            ----------
-            filename : str
-                The VCF filename
-            fasta : a locuspocus Fasta object
-                Alleles will be conformed according to the reference
-                genotype in the fasta. This save TONS of headaches down
-                the line
-
-            Returns
-            -------
-            None if successful
-        '''
-        # Create one task to read from file, and another to put into database
-        async def read_VCF_records(queue,filename,file_id,cur):
-            with RawFile(filename,'r') as IN:
-                for i,line in enumerate(IN): 
-                    line = line.strip()
-                    if line.startswith('##'):
-                        self._add_VCF_header(file_id,i,line,cur=cur)
-                    elif line.startswith('#CHROM'):
-                        cur_samples = self.cohort.add_accessions(
-                            [Accession(name,files=[filename]) for name in line.split()[9:]]
-                        )
-                        cur_AIDs = [x['AID'] for x in cur_samples]
-                        # The first thing on the queue is the AIDs
-                        await queue.put(cur_AIDs)
-                    else:
-                        chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split()
-                        info = [field.split('=') for field in info.split(';')]
-                        # Make a variant
-                        variant = Locus(
-                           chrom, pos,
-                           id=id, ref=ref, alt=alt,
-                           qual=qual
-                        )
-                        # Find the Genotype Field Index
-                        GT_ind = fmt.split(':').index('GT')
-                        # Insert the genotypes 
-                        def extract_genotype(g):
-                            GT = g.split(':')[GT_ind]
-                            flag,dosage = self._process_GT(GT)
-                        genos = [extract_genotype(g) for g in genos]
-                        await queue.put((variant,genos))
-            await queue.put((None,None))
-
-        async def add_VCF_records(queue,filename,file_id,cur):
-            AIDs = await queue.get()
-            recs = asyncio.Queue()
-            while True:
-                locus,genos = await queue.get()
-                if locus is None:
-                    break
-                # Put the item in the database
-                self.loci.add_locus(locus)
-                LID = self.loci.LID(locus)
-                if recs.qsize() >= 100000:
-                    cur.executemany('''
-                        INSERT OR REPLACE INTO genotypes (FILEID,VARIANTID,SAMPLEID,flag,dosage) VALUES (?,?,?,?,?) 
-                    ''',(x for x in recs.get()))
-                else:
-                    await queue.put((file_id,LID,A,F,D) for A,(F,D) in zip(AIDs,genos))
-
-        loop = asyncio.get_event_loop()
-        queue = asyncio.Queue(loop=loop)
-        # use the APSW context manager -- NEAT!
-        with self._db as db:
-            cur = db.cursor()
-            #cur.execute('PRAGMA synchronous = off')
-            cur.execute('PRAGMA journal_mode = memory')
-            # Add the filename to the Database
-            file_id = self._add_VCF_filename(filename,cur=cur)
-            prod = read_VCF_records(queue,filename,file_id,cur)
-            cons = add_VCF_records(queue,filename,file_id,cur)
-            loop.run_until_complete(asyncio.gather(prod,cons))
-            loop.close()
-
-    
-    def add_VCF(self, filename, force=False):
-        '''
-            Adds variants from a VCF file to the database.
-
-            Parameters
-            ----------
-            filename : str
-                The VCF filename
-            fasta : a locuspocus Fasta object
-                Alleles will be conformed according to the reference
-                genotype in the fasta. This save TONS of headaches down
-                the line
-
-            Returns
-            -------
-            None if successful
-        '''
-        log.info(f'Importing genotypes from {filename}')
-        with self.bulk_transaction() as cur:
-            #cur.execute('PRAGMA synchronous = off')
-            cur.execute('PRAGMA journal_mode = memory')
-            start_time = time.time()
-            # Add the filename to the Database
-            try:
-                cur.execute('''
-                    INSERT INTO files (filename) VALUES (?)
-                ''',(filename,))
-            except ConstraintError as e:
-                log.warn(f'{filename} was already added.')
-                if force == False:
-                    return
-            file_id, = cur.execute('SELECT FILEID FROM files WHERE filename = ?;',(filename,)).fetchone()
-            # Iterate over the file and build the pieces of the database
-            with RawFile(filename) as IN:
-                variants = []
-                genotypes = []
-                for line_id,line in enumerate(IN):
-                    if len(variants) >= 100_000:
-                        self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
-                        start_time = time.time()
-                    line = line.strip()
-                    # Case 1: Header line
-                    if line.startswith('##'):
-                        self._add_VCF_header(file_id,line_id,line,cur=cur)
-                    # Case 2: Sample Line
-                    elif line.startswith('#CHROM'):
-                        cur_samples = [Accession(name,files=[filename]) for name in line.split()[9:]]
-                        self.cohort.add_accessions(cur_samples)
-                        cur_samples = self.cohort.AID_mapping
-                    # Case 3: Genotypes
-                    else:
-                        # Split the line into its parts
-                        chrom,pos,id,ref,alt,qual,fltr,info,fmt,*genos = line.split()
-                        info = [field.split('=') for field in info.split(';')]
-                        # Make a variant
-                        variant = Locus(
-                           chrom, pos,
-                           id=id, ref=ref, alt=alt,
-                        )
-                        variants.append(variant)
-                        var_id = variant.id
-                        # Insert the observed QUAL score
-                        cur.execute('''
-                            INSERT OR REPLACE INTO variant_qual (FILEID,VARIANTID,qual,filter) VALUES (?,?,?,?)
-                        ''',(file_id,var_id,qual,fltr))
-                        # Find the Genotype Field Index
-                        GT_ind = fmt.split(':').index('GT')
-                        # Insert the genotypes 
-                        for g,sample in zip(genos,cur_samples.values()):
-                            GT = g.split(':')[GT_ind]
-                            dosage = self._GT_to_dosage(GT)
-                            if not np.isnan(dosage):
-                                genotypes.append(self.genoVCF(
-                                    file_id,
-                                    var_id,
-                                    sample,
-                                    self._GT_to_flag(GT),
-                                    dosage
-                                ))
-            self._dump_VCF_records_to_db(cur,variants,genotypes,start_time)
-            log.info('Import Successful.')
-
 
     def to_VCF(self,filename,cohort=None,loci=None):
         '''
@@ -737,7 +627,37 @@ class VarDab(Freezable):
             keys.append(None)
         return [ (tag,x,y) for x,y in zip(keys,vals)]
 
+
+    @contextmanager
+    def suspend_sqlite_indices(self):
+        cur = self._db.cursor()
+        log.info('Dropping INDEXES')
+        cur.execute('''
+            DROP INDEX IF EXISTS genotype_VARIANTID;
+            DROP INDEX IF EXISTS genotype_SAMPLE_VARIANT;
+            DROP INDEX IF EXISTS genotype_FILEID;
+            DROP INDEX IF EXISTS genotype_SAMPLEID;
+        ''')
+        yield
+        log.info('Rebuilding INDEXES')
+        cur.execute('''
+            CREATE INDEX IF NOT EXISTS genotype_VARIANTID ON genotypes (VARIANTID);
+            CREATE INDEX IF NOT EXISTS genotype_SAMPLE_VARIANT on genotypes (VARIANTID,SAMPLEID);
+            CREATE INDEX IF NOT EXISTS genotype_FILEID ON genotypes (FILEID);
+            CREATE INDEX IF NOT EXISTS genotype_SAMPLEID ON genotypes (SAMPLEID);
+        ''')
+
+
     def _initialize_tables(self):
+        # Initialize the cassandra namespace
+        cas =  self._cassandra()
+        default_keyspace = f'{self._m80_name}_{self._m80_type}'
+        cas.execute(f'''
+            CREATE KEYSPACE {default_keyspace}
+            WITH replication = {{'class':'SimpleStrategy','replication_factor':2}};
+        ''')
+        # Create the table for variants
+
         cur = self._db.cursor()
         self._schema = []
         # Files -- Meta Data
