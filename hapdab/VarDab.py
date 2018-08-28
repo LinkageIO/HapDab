@@ -19,7 +19,7 @@ from contextlib import contextmanager
 # Linkage Imports
 from minus80 import Freezable, Cohort, Accession
 from itertools import chain,repeat,product
-from locuspocus import Locus,Loci,Fasta
+from locuspocus import Locus,RefLoci,Fasta
 
 # Internal Imports
 from .RawFile import RawFile 
@@ -116,7 +116,7 @@ class VarDab(Freezable):
         '''
         super().__init__(name)
         # Attach the Loci database
-        self.loci = Loci(name)     
+        self.loci = RefLoci(name)     
         self._db.cursor().execute(
             'ATTACH DATABASE ? AS loci;',(self.loci._dbfilename(),)
         )
@@ -219,9 +219,9 @@ class VarDab(Freezable):
         
             Parameters
             ----------
-            cohort : iterable of cohort
+            cohort : minus80 Cohort object
 
-            loci : an iterable of loci 
+            loci : an iterable of loci objects
 
             Returns
             -------
@@ -757,47 +757,3 @@ class VarDab(Freezable):
         ''')
     
 
-    def _sqliteshell_debug(self):
-        '''
-            Print out the commands to recreate the database environment 
-            seen within this class from the command line. 
-        '''
-        print(f'''
-            rlwrap sqlite3 {self._dbfilename()}
-            ATTACH DATABASE "{self.loci._dbfilename()}" as loci;
-            ATTACH DATABASE "{self.cohort._dbfilename()}" as cohort;
-
-            CREATE TEMP VIEW loci_alleles AS
-            SELECT 
-                loci.rowid as LID,
-                loci.id, 
-                chromosome, 
-                start, 
-                end, 
-                ref.val AS rAllele, 
-                alt.val AS aAllele
-            FROM loci
-            LEFT JOIN loci_attrs ref 
-                ON loci.id = ref.id 
-                AND ref.key = "ref" 
-            LEFT JOIN loci_attrs alt 
-                ON loci.id = alt.id 
-                AND alt.key = "alt";
-
-            CREATE TEMP VIEW sample_genotypes AS
-            SELECT 
-                LA.LID,
-                LA.chromosome,
-                LA.start,
-                LA.rAllele,
-                LA.aAllele,
-                A.name,
-                G.dosage,
-                G.flag
-            FROM loci_alleles LA 
-                CROSS JOIN accessions A 
-            LEFT OUTER JOIN genotypes G 
-                ON  LA.LID=VARIANTID 
-                AND A.AID=SAMPLEID;
-        '''
-        )

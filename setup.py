@@ -24,22 +24,6 @@ def find_version(*file_paths):
         return version_match.group(1)
     raise RuntimeError("Unable to find version string.")
 
-class PostDevelopCommand(develop):
-    """Post-installation for development mode."""
-    def run(self):
-        print('Running post-installation for apsw')
-        check_call('''\
-        pip install -r requirements.txt
-        '''.split())
-        develop.run(self)
-
-class PostInstallCommand(install):
-    """Post-installation for installation mode."""
-    def run(self):
-        check_call('''\
-        pip install -r requirements.txt
-        '''.split())
-        install.run(self)
 setup(
     name = 'hapdab',
     version = find_version('hapdab','__init__.py'),
@@ -48,16 +32,25 @@ setup(
     ],
     ext_modules = [],
     cmdclass = {
-        #'build_ext': build_ext
-        'develop': PostDevelopCommand,
-        'install': PostInstallCommand,
     },
 
     package_data = {
         '':['*.cyx'],    
         'beagle':'include/beagle/beagle.08Jun17.d8b.jar'
     },
+    python_requires='>=3.6',
+    setup_requires=[
+        'setuptools>=18.0',
+    ],
     install_requires = [		
+        'minus80>=0.2.0',
+        'locuspocus>=0.1.1',
+        'scipy>=1.1.0',
+        'pandas>=0.23.4',
+        'numpy>=1.15.0',
+        'pysam>=0.15.0',
+        'cassandra-driver>=3.14.0',
+        'aiofiles>=0.4.0'
     ],
     include_package_data=True,
 
