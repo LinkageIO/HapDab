@@ -2,10 +2,16 @@
 
 import os
 import sys
+import pkg_resources
+import subprocess
+import shutil
 
 from minus80 import Freezable, Cohort, Accession
 from minus80.RawFile import RawFile
 from locuspocus import Locus, RefLoci, Fasta
+
+
+from .Variant import Variant
 
 
 class HapDab(Freezable):
@@ -24,7 +30,7 @@ class HapDab(Freezable):
     def from_files(cls,name,vcffile,fastafile):
         self = cls(name)
         self._add_fasta(fastafile)
-        self._add_vcf(vcffile)
+        self._add_ref_vcf(vcffile)
         return self
 
     def _add_fasta(self,fastafile):
@@ -35,59 +41,40 @@ class HapDab(Freezable):
         # and remember for next time
         self._dict['Fasta'] = self._m80_name
 
-    def _add_vcf(self,vcf_file):
-        sorted_vcf = self_sort(vcf_file) 
-        # conform
-        # phase
-        # java -jar ../../hapdab/include/beagle/beagle.08Jun17.d8b.jar gt=2M_CHIP_1000.vcf.gz out=test.phased nthreads=30
-        pass
+    def _add_ref_vcf(self,vcf_file,skip_conform=False,skip_phase=False):
+        original_vcf = vcf_file
+        tmp_files = set()
+        if not skip_conform:
+            conformed = self._conform_vcf(vcf_file)
+            tmp_files.add(conformed)
+            vcf_file = conformed.name
+        if not skip_phase:
+            phased = self._phase_vcf(vcf_file)
+            tmp_files.add(phased)
+            vcf_file = phased.name+'.vcf.gz'
+        # Copy the file 
+        dest_path = os.path.join(self._basedir,'reference.vcf.gz')
+        shutil.copy(vcf_file,dest_path)
+        
 
-    def _conform_vcf(self,vcf_file):
-        vcf = vcf_file
-        with open(args.out,'w') as OUT:
-            #Clear the header, add the actual chromosomes
-            vcf.header['contig'] = []
-            for chrom in annot._annot.chrom.unique():
-                vcf.header['contig'].append('<ID={}>'.format(chrom))
-            print(vcf.header,file=OUT)
-            for i,variant in enumerate(vcf):
-                # Update the chrom and position to be reflect the MNEc naming format 
-                if variant.id in id_map:
-                    chrom,pos,mnecid = id_map[variant.id]
-                    variant.chrom = chrom
-                    variant.pos = pos
-                    variant.id = mnecid 
-                elif ('{}'.format(variant.chrom),variant.pos) in id_map:
-                    chrom = variant.chrom
-                    pos = variant.pos
-                    if not chrom.startswith('chr'):
-                        chrom = 'chr{}'.format(chrom)
-                    chrom,pos,mnecid = id_map[('{}'.format(chrom),variant.pos)]
-                    variant.chrom = chrom
-                    variant.pos = pos
-                    variant.id = mnecid 
-                else:
-                    continue
-                # Make sure the genotypes are conformed
-                if variant.alt == '.':
-                    variant.alt = REF_map[variant.id][1]
-                try:
-                    variant.conform(REF_map[variant.id][0])
-                except TriAllelicError as e:
-                    continue
-                try:
-                    assert variant.alt == REF_map[variant.id][1]
-                except AssertionError as e:
-                    continue
-                # Fix the borked dot genotpyes
-                for i,x in enumerate(variant.genos):
-                    if x == '.':
-                        variant.genos[i] = './.'
-                print(variant,file=OUT)
+    def _phase_vcf(self,vcf_file):
+        # Get a temp file for the output
+        imputed_vcf = self._tmpfile(delete=False)
+        # Get the path of BEAGLE
+        beagle_path = pkg_resources.resource_filename(
+            'hapdab',
+            'include/beagle/beagle.08Jun17.d8b.jar'
+        )
+        # Create a command
+        cmd = f"java -jar {beagle_path} gt={vcf_file} out={imputed_vcf.name}".split()
+        phaser = subprocess.run(cmd)
+        if phaser.returncode != 0:
+            raise ValueError("Phasing failed!")
+        return imputed_vcf
 
-    def _sort_vcf(self,vcf_file): 
+    def _conform_vcf(self,vcf_file): 
         '''
-            Sorts an input vcf based on the fasta
+            Conforms and sorts an input vcf based on the fasta
 
             Parameters
             ----------
@@ -122,14 +109,15 @@ class HapDab(Freezable):
                 if line.startswith("#"):
                     headers.append(line.strip())
                 else:
-                    chrom,pos,*junk = line.split()
-                    temps[chrom].write(line)
+                    var = Variant.from_str(line)
+                    #var.conform(self._fasta[var.chrom][var.pos].upper())
+                    temps[var.chrom].write(str(var)+'\n')
         # close all temp files
         for key,val in temps.items():
             log("flushing tmp file: {}",key)
             val.flush()
         log("Outputting sorted chroms")
-        out = self._tmpfile(suffix='sorted_vcf')
+        out = self._tmpfile(suffix='_sorted_vcf')
         # print headers
         print("\n".join(headers),file=out)
         for chrom in chroms:
