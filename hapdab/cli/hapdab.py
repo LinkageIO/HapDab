@@ -4,7 +4,7 @@ import click
 import hapdab as hap
 
 
-@click.group(epilog=f'Made with Love in Denver -- Version {hap.__version__}\n{hap.__file__}')
+@click.group(epilog=f'Version {hap.__version__}\n{hap.__file__}')
 def cli():
     '''
     \b
@@ -15,6 +15,28 @@ def cli():
         |_| |_|\__,_| .__/ \__,_|\__,_|_.__/ 
                     |_|    
     '''
+
+@click.command(short_help='Create a HapDab database')
+@click.argument('name',metavar='<name>')
+@click.argument('vcf',metavar='<vcf>')
+@click.argument('fasta',metavar='<fasta>')
+def create(name,vcf,fasta):
+    '''
+    \b
+    Create a HapDab database for imputation from
+    a reference genome and a VCF file.
+
+    \b
+    Positional Arguments:
+    <name>  - The name of the resultant HapDab database
+    <vcf>   - The input VCF file
+    <fasta> - An input Fasta file
+    '''
+    if name is None or vcf is None or fasta is None:
+        click.echo('Invalid Syntax: use --help for more.')
+    else:
+        h = hap.HapDab.from_files(name,vcf,fasta)
+cli.add_command(create)
 
 #----------------------------
 #    List Commands
