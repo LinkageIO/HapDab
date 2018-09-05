@@ -80,7 +80,7 @@ setup(
     ],
     install_requires = [		
         'minus80>=0.2.0',
-        'locuspocus>=0.1.1',
+        'locuspocus==0.1.1',
         'scipy>=1.1.0',
         'pandas>=0.23.4',
         'numpy>=1.15.0',
