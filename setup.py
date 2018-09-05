@@ -27,6 +27,42 @@ def find_version(*file_paths):
 setup(
     name = 'hapdab',
     version = find_version('hapdab','__init__.py'),
+
+    description = 'An library for managing and analyzing genotypes and haplotypes',
+    url = 'http://linkage.io',
+    author = 'Rob Schaefer',
+    license = "Copyright Linkage Analytics 2016-2018. Available under the MIT License",
+    author_email = 'rob@linkage.io',
+
+
+    classifiers=[
+	# How mature is this project? Common values are
+	#   3 - Alpha
+	#   4 - Beta
+	#   5 - Production/Stable
+	'Development Status :: 4 - Beta',
+
+	# Indicate who your project is intended for
+	'Intended Audience :: Developers',
+	'Topic :: Software Development :: Build Tools',
+
+	# Pick your license as you wish (should match "license" above)
+	 'License :: OSI Approved :: MIT License',
+
+	# Specify the Python versions you support here. In particular, ensure
+	# that you indicate whether you support Python 2, Python 3 or both.
+	'Programming Language :: Python :: 3',
+	'Programming Language :: Python :: 3.6',
+    ],
+    keywords='data storage biology freeze', 
+    project_urls={
+        'Documentation' : 'http://linkage.io',
+        'Source' : 'https://github.com/LinkageIO/HapDab',
+        'Tracker' : 'https://github.com/LinkageIO/Minus80/HapDab'
+    },
+
+
+
     packages = find_packages(),
     scripts = [
     ],
@@ -54,9 +90,10 @@ setup(
     ],
     include_package_data=True,
 
-    author = 'Rob Schaefer',
-    author_email = 'rob@linkage.io',
-    description = 'An library for managing and analyzing genotypes and haplotypes',
-    license = "Copyright Linkage Analytics 2017. Available under the MIT License",
-    url = 'linkage.io'
+    entry_points='''
+        [console_scripts]
+        hapdab=hapdab.cli.hapdab:cli
+    ''',
+    
+
 )
