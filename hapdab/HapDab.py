@@ -5,6 +5,7 @@ import sys
 import pkg_resources
 import subprocess
 import shutil
+import logging
 
 from minus80 import Freezable, Cohort, Accession
 from minus80.RawFile import RawFile
@@ -15,6 +16,16 @@ from .Variant import Variant
 
 
 class HapDab(Freezable):
+    
+    # Init method
+    log = logging.getLogger(__name__)
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter(
+                    '%(asctime)s %(name)-12s %(levelname)-8s %(message)s'
+                )
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
 
     def __init__(self,name,parent=None):
         super().__init__(name)
@@ -22,9 +33,7 @@ class HapDab(Freezable):
         if 'Fasta' in self._dict:
             self._fasta = Fasta(self._dict['Fasta'],parent=self)
 
-    def _initialize_tables(self):
-        pass
-
+    # Class Methods
 
     @classmethod
     def from_files(cls,name,vcffile,fastafile):
@@ -32,6 +41,11 @@ class HapDab(Freezable):
         self._add_fasta(fastafile)
         self._add_ref_vcf(vcffile)
         return self
+
+    # Private Methods
+
+    def _initialize_tables(self):
+        pass
 
     def _add_fasta(self,fastafile):
         if 'Fasta' in self._dict:
@@ -41,7 +55,7 @@ class HapDab(Freezable):
         # and remember for next time
         self._dict['Fasta'] = self._m80_name
 
-    def _add_ref_vcf(self,vcf_file,skip_conform=False,skip_phase=False):
+    def _add_ref_vcf(self, vcf_file, skip_conform=False, skip_phase=False):
         original_vcf = vcf_file
         tmp_files = set()
         if not skip_conform:
@@ -63,7 +77,8 @@ class HapDab(Freezable):
         # Get the path of BEAGLE
         beagle_path = pkg_resources.resource_filename(
             'hapdab',
-            'include/beagle/beagle.08Jun17.d8b.jar'
+            #'include/beagle/beagle.08Jun17.d8b.jar'
+            'include/beagle/beagle.03Jul18.40b.jar'
         )
         # Create a command
         cmd = f"java -jar {beagle_path} gt={vcf_file} out={imputed_vcf.name}".split()
@@ -85,15 +100,13 @@ class HapDab(Freezable):
             -------
             A named temp file containing the sorted vcf
         '''
-        def log(message,*formatting):
-            print(message.format(*formatting),file=sys.stderr)
         headers = list()
         variants = list()
         cur_byte = 0
         chroms = list() 
         temps  = dict()
     
-        log("Sorting {}",vcf_file)
+        self.log.info(f"Sorting {vcf_file}")
         # Get the chromosome order
         # Iterate through the chromosome keys and open temp files
         try:
@@ -101,9 +114,9 @@ class HapDab(Freezable):
                 temps[chrom] = self._tmpfile(suffix=f'sorted_vcf_{chrom}') 
                 chroms.append(chrom)
         except Exception as e:
-            log('{}: try increasing the open file limit on your system',e)
+            self.log.info(f'{e}: try increasing the open file limit on your system')
         # Get headers and extract positions with file byte offsets
-        log("Reading in VCF: {}",vcf_file)
+        self.log.info(f"Reading in VCF: {vcf_file}")
         with RawFile(vcf_file) as VCF:
             for i,line in enumerate(VCF):
                 if line.startswith("#"):
@@ -114,9 +127,9 @@ class HapDab(Freezable):
                     temps[var.chrom].write(str(var)+'\n')
         # close all temp files
         for key,val in temps.items():
-            log("flushing tmp file: {}",key)
+            self.log.info("flushing tmp file: {key}")
             val.flush()
-        log("Outputting sorted chroms")
+        self.log.info("Outputting sorted chroms")
         out = self._tmpfile(suffix='_sorted_vcf')
         # print headers
         print("\n".join(headers),file=out)
@@ -126,6 +139,6 @@ class HapDab(Freezable):
                 variants =  CHROM.readlines()
                 # sort by position
                 variants.sort(key=lambda x: int(x.split()[1]))
-                log("printing chrom {}",chrom)
+                self.log.info(f"printing chrom {chrom}")
                 print("".join(variants),file=out,end="")
         return out
