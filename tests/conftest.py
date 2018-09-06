@@ -11,23 +11,4 @@ def ACGTFasta():
     x = lp.Fasta.from_file('data/ACGT.fasta') 
     return x
 
-@pytest.fixture(scope='module')
-def IncreasingAF(ACGTFasta):
-    m80Tools.delete('PytestIncAF',force=True)
-    x = dab.VarDab('PytestIncAF',ACGTFasta)
-    x.add_VCF('data/IncreasingAC.vcf')
-    return x
 
-@pytest.fixture(scope='module')
-def IncreasingAFSwapRef(ACGTFasta):
-    m80Tools.delete('PytestIncAFSwapRef',force=True)
-    x = dab.VarDab('PytestIncAFSwapRef',ACGTFasta)
-    x.add_VCF('data/IncreasingACSwappedRef.vcf')
-    return x
-
-@pytest.fixture(scope='module')
-def MissingGenotypes(ACGTFasta):
-    m80Tools.delete('PytestMissingGenotypes',force=True)
-    x = dab.VarDab('PytestMissingGenotypes',ACGTFasta)
-    x.add_VCF('data/MissingGenotypes.vcf')
-    return x
