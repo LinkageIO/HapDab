@@ -20,7 +20,8 @@ def cli():
 @click.argument('name',metavar='<name>')
 @click.argument('vcf',metavar='<vcf>')
 @click.argument('fasta',metavar='<fasta>')
-def create(name,vcf,fasta):
+@click.option('--skip-phase',default=False,is_flag=True,help='Flag to skip phasing')
+def create(name,vcf,fasta,skip_phase):
     '''
     \b
     Create a HapDab database for imputation from
@@ -35,28 +36,30 @@ def create(name,vcf,fasta):
     if name is None or vcf is None or fasta is None:
         click.echo('Invalid Syntax: use --help for more.')
     else:
-        h = hap.HapDab.from_files(name,vcf,fasta)
+        h = hap.HapDab.from_files(name,vcf,fasta,skip_phase=skip_phase)
 cli.add_command(create)
 
 #----------------------------
-#    List Commands
+#    Impute Commands
 #----------------------------
-@click.command(short_help='Impute a VCF file.',
-    help='Impute a VCF file to a higher genotype density.'
-)
-#@click.option('--name',  default=None,
-#    help="The name of the dataset you want to check is available. The default value is the wildcard '*' which will return all available datasets with the specified dtype."
-#)
-#@click.option('--dtype', default=None,
-#    help='Each dataset has a datatype associated with it. E.g.: `Cohort`. If no dtype is specified, all available dtypes  will be returned.'
-#)
-def impute():
+@click.command(short_help='Impute a VCF file.')
+@click.argument('name',metavar='<name>')
+@click.argument('vcf',metavar='<vcf>')
+def impute(name,vcf):
+    '''
+    Impute a VCF file to a higher genotype density.
+
+    \b
+    Positional Arguments:
+    <name> - The name of the HapDab databse to use for imputation.
+    <vcf>  - The input (low density) VCF to be imputed
+    '''
     pass
 
 cli.add_command(impute)
 
 #----------------------------
-#    delete Commands
+#    Remap Commands
 #----------------------------
 @click.command(help='Remap SNP coordinates.')
 #@click.argument('dtype',metavar='<dtype>')
