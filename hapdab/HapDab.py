@@ -58,7 +58,7 @@ class HapDab(Freezable):
     # Private Methods
     # --------------------------------------------
 
-    def _add_fasta(self,fastafile):
+    def _add_fasta(self,fasta):
         '''
             Add a reference geneome sequence to the database.
             This reference sequence will be used to sort and 
@@ -67,7 +67,7 @@ class HapDab(Freezable):
 
             Parameters
             ----------
-            fastafile : str, path-like
+            fasta : str, path-like or a locuspocus.Fasta object
                 Path to the fasta file
 
             Returns
@@ -83,7 +83,12 @@ class HapDab(Freezable):
         '''
         if 'Fasta' in self._dict:
             raise ValueError('A Fasta has already been assigned to this database!')
-        f = Fasta.from_file(self._m80_name,fastafile,parent=self)
+        if os.path.exists(fasta):
+            f = Fasta.from_file(self._m80_name,fasta,parent=self)
+        elif isinstance(fasta,Fasta):
+            raise NotImplementedError('This is not supported yet.')
+        else:
+            raise ValueError(f'Unable to determine the type of fasta')
         self._fasta = f
         # and remember for next time
         self._dict['Fasta'] = self._m80_name
@@ -172,7 +177,7 @@ class HapDab(Freezable):
                     temps[var.chrom].write(str(var)+'\n')
         # close all temp files
         for key,val in temps.items():
-            self.log.info("flushing tmp file: {key}")
+            self.log.info(f"flushing tmp file: {key}")
             val.flush()
         self.log.info("Outputting sorted chroms")
         out = self._tmpfile(suffix='_sorted_vcf')
