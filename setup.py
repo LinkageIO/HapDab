@@ -85,7 +85,7 @@ setup(
         'pandas>=0.23.4',
         'numpy>=1.15.0',
         #'pysam>=0.15.0',
-        'cassandra-driver>=3.14.0',
+        #'cassandra-driver>=3.14.0',
         'aiofiles>=0.4.0'
     ],
     include_package_data=True,
