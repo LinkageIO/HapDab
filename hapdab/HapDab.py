@@ -6,6 +6,7 @@ import pkg_resources
 import subprocess
 import shutil
 import logging
+import gzip
 
 from minus80 import Freezable, Cohort, Accession
 from minus80.RawFile import RawFile
@@ -106,7 +107,17 @@ class HapDab(Freezable):
             vcf_file = phased.name+'.vcf.gz'
         # Copy the file 
         dest_path = os.path.join(self._basedir,'reference.vcf.gz')
-        shutil.copy(vcf_file,dest_path)
+        try:
+            # peek will return if gzipped
+            gzip.open(vcf_file).peek(1)
+            shutil.copy(vcf_file,dest_path)
+        except AttributeError as e:
+            # gzip will throw an AttributeError excpetion if not gzipped
+            with open(vcf_file,'rb') as IN:
+                with gzip.open(dest_path,'wb') as OUT:
+                    shutil.copyfileobj(IN,OUT)
+
+
        
 
     def _phase_vcf(self,vcf_file):
