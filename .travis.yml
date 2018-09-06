@@ -11,7 +11,7 @@ install:
 - conda config --set always_yes yes --set changeps1 no
 - conda update -q conda
 - conda info -a
-- conda create -q -n hapdab python=3 Cython numpy pandas pytest pytest-cov
+- conda create -q -n hapdab python=3.6 Cython numpy pandas pytest pytest-cov
 - source activate hapdab
 - python setup.py install
 - pip install codecov
