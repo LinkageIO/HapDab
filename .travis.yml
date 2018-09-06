@@ -19,7 +19,6 @@ script:
 - source activate hapdab
 - cd tests
 - py.test -v --cov=hapdab
-- codecov
 after_success:
 - coveralls
 deploy:
