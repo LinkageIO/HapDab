@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import click
+import shutil
 import hapdab as hap
 
 
@@ -45,7 +46,11 @@ cli.add_command(create)
 @click.command(short_help='Impute a VCF file.')
 @click.argument('name',metavar='<name>')
 @click.argument('vcf',metavar='<vcf>')
-def impute(name,vcf):
+@click.option('--out', default=None,
+    help=('An optional output name. If not specified, one '
+           'will be created from <vcf>')
+)
+def impute(name,vcf,out):
     '''
     Impute a VCF file to a higher genotype density.
 
@@ -54,7 +59,12 @@ def impute(name,vcf):
     <name> - The name of the HapDab databse to use for imputation.
     <vcf>  - The input (low density) VCF to be imputed
     '''
-    pass
+    h = hap.HapDab(name)
+    if out is None:
+        out = vcf.replace('.vcf','').replace('.gz','') + '.imputed.vcf.gz'
+    imputed = h.impute(vcf)
+    shutil.copyfile(imputed,out)
+
 
 cli.add_command(impute)
 
