@@ -55,7 +55,38 @@ class HapDab(Freezable):
             Impute a VCF file to the density of the 
             Reference VCF
         '''
-        pass
+        # Get a temp file for the output
+        imputed_vcf = self._tmpfile()
+        # Beagle needs a file with one common samples to exclude
+        #self.log.info('Finding common samples to exclude')
+        #common_sample = self._tmpfile()
+        #with open(vcf_file,'r') as IN:
+        #    for line in IN:
+        #        if line.startswith('#CHROM'):
+        #            fields = line.split()
+        #            self.log.info(f'Found {len(fields[9:])} samples in common')
+        #            common_sample.write("\n".join(fields[9:]))
+        #            common_sample.flush()
+        #            break
+        #        elif line.startswith('##'):
+        #            continue
+        #        else:
+        #            raise Exception('Could not find sample IDS in VCF header')
+        # Get the path of BEAGLE
+        beagle_path = pkg_resources.resource_filename(
+            'hapdab',
+            #'include/beagle/beagle.08Jun17.d8b.jar'
+            'include/beagle/beagle.03Jul18.40b.jar'
+        )
+        ref_vcf = os.path.join(self._basedir,'reference.vcf.gz')
+        # Create a command
+        cmd = (f"java -jar {beagle_path} impute=true ref={ref_vcf} "
+               f"gt={vcf_file} out={imputed_vcf.name}").split()
+        phaser = subprocess.run(cmd)
+        if phaser.returncode != 0:
+            raise ValueError("Imputation failed!")
+        return imputed_vcf.name + '.vcf.gz'
+        
 
     # --------------------------------------------
     # Private Methods
