@@ -21,6 +21,7 @@ script:
 - py.test -v --cov=hapdab
 after_success:
 - coveralls
+- cd ..
 deploy:
   provider: pypi
   user: schae234
