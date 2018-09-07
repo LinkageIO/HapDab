@@ -8,6 +8,8 @@ import shutil
 import logging
 import gzip
 
+import minus80 as m80
+
 from minus80 import Freezable, Cohort, Accession
 from minus80.RawFile import RawFile
 from locuspocus import Locus, RefLoci, Fasta
@@ -86,8 +88,12 @@ class HapDab(Freezable):
             raise ValueError('A Fasta has already been assigned to this database!')
         if os.path.exists(fasta):
             f = Fasta.from_file(self._m80_name,fasta,parent=self)
-        elif isinstance(fasta,Fasta):
-            raise NotImplementedError('This is not supported yet.')
+        elif m80.Tools.available('Fasta',fasta):
+            f = Fasta(fasta)
+            os.symlink(
+                f._basedir, 
+                os.path.join(self._basedir,f'Fasta.{f._m80_name}')
+            )
         else:
             raise ValueError(f'Unable to determine the type of fasta')
         self._fasta = f
@@ -111,14 +117,13 @@ class HapDab(Freezable):
             # peek will return if gzipped
             gzip.open(vcf_file).peek(1)
             shutil.copy(vcf_file,dest_path)
-        except AttributeError as e:
+        except OSError as e:
             # gzip will throw an AttributeError excpetion if not gzipped
+            self.log.info('compressing the output file')
             with open(vcf_file,'rb') as IN:
                 with gzip.open(dest_path,'wb') as OUT:
                     shutil.copyfileobj(IN,OUT)
-
-
-       
+         
 
     def _phase_vcf(self,vcf_file):
         '''
@@ -134,7 +139,7 @@ class HapDab(Freezable):
             A handle to a temporary file containing phased data
         '''
         # Get a temp file for the output
-        imputed_vcf = self._tmpfile()
+        phased_vcf = self._tmpfile()
         # Get the path of BEAGLE
         beagle_path = pkg_resources.resource_filename(
             'hapdab',
@@ -142,11 +147,11 @@ class HapDab(Freezable):
             'include/beagle/beagle.03Jul18.40b.jar'
         )
         # Create a command
-        cmd = f"java -jar {beagle_path} gt={vcf_file} out={imputed_vcf.name}".split()
+        cmd = f"java -jar {beagle_path} gt={vcf_file} out={phased_vcf.name}".split()
         phaser = subprocess.run(cmd)
         if phaser.returncode != 0:
             raise ValueError("Phasing failed!")
-        return imputed_vcf
+        return phased_vcf
 
     def _conform_vcf(self,vcf_file): 
         '''
