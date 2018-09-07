@@ -216,7 +216,12 @@ class HapDab(Freezable):
         self.log.info(f"Reading in VCF: {vcf_file}")
         with RawFile(vcf_file) as VCF:
             for i,line in enumerate(VCF):
-                if line.startswith("#"):
+                if line.startswith('#CHROM'):
+                    fields = line.strip().split()
+                    for i in range(9,len(fields)):
+                        fields[i] = fields[i] + '_ref'
+                    headers.append('\t'.join(fields))
+                elif line.startswith("#"):
                     headers.append(line.strip())
                 else:
                     var = Variant.from_str(line)
