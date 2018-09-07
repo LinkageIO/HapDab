@@ -1,6 +1,7 @@
 #!/bin/env/python3
 
 import os
+import io
 import sys
 import pkg_resources
 import subprocess
@@ -129,7 +130,7 @@ class HapDab(Freezable):
             raise ValueError(f'Unable to determine the type of fasta')
         self._fasta = f
         # and remember for next time
-        self._dict['Fasta'] = self._m80_name
+        self._dict['Fasta'] = f._m80_name
 
     def _add_ref_vcf(self, vcf_file, skip_conform=False, skip_phase=False):
         '''
@@ -152,8 +153,9 @@ class HapDab(Freezable):
             # gzip will throw an AttributeError excpetion if not gzipped
             self.log.info('compressing the output file')
             with open(vcf_file,'rb') as IN:
-                with gzip.open(dest_path,'wb') as OUT:
-                    shutil.copyfileobj(IN,OUT)
+                with gzip.open(dest_path,'wb',compresslevel=6) as OUT:
+                    shutil.copyfileobj(IN,OUT,length=512*(2**20))
+            self.log.info('done compressing')
          
 
     def _phase_vcf(self,vcf_file):
