@@ -14,7 +14,7 @@ def cli():
         | '_ \ / _` | '_ \ / _` |/ _` | '_ \ 
         | | | | (_| | |_) | (_| | (_| | |_) |
         |_| |_|\__,_| .__/ \__,_|\__,_|_.__/ 
-                    |_|    
+                    |_|   (powered by minus80) 
     '''
 
 @click.command(short_help='Create a HapDab database')
@@ -79,4 +79,8 @@ def remap(name, dtype):
 
 cli.add_command(remap)
 
+
+
+from minus80.cli.minus80 import cloud
+cli.add_command(cloud)
 
