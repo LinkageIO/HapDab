@@ -79,8 +79,8 @@ setup(
         'setuptools>=18.0',
     ],
     install_requires = [		
-        'minus80>=0.2.0',
-        'locuspocus==0.1.1',
+        'minus80>=0.2.2',
+        'locuspocus>=0.1.2',
         'scipy>=1.1.0',
         'pandas>=0.23.4',
         'numpy>=1.15.0',
