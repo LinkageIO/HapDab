@@ -3,6 +3,8 @@
 import click
 import shutil
 import hapdab as hap
+import minus80 as m80
+from minus80.cli.minus80 import cloud
 
 
 @click.group(epilog=f'Version {hap.__version__}\n{hap.__file__}')
@@ -17,6 +19,10 @@ def cli():
                     |_|   (powered by minus80) 
     '''
 
+
+#----------------------------
+#    create Commands
+#----------------------------
 @click.command(short_help='Create a HapDab database')
 @click.argument('name',metavar='<name>')
 @click.argument('vcf',metavar='<vcf>')
@@ -39,6 +45,21 @@ def create(name,vcf,fasta,skip_phase):
     else:
         h = hap.HapDab.from_files(name,vcf,fasta,skip_phase=skip_phase)
 cli.add_command(create)
+
+#----------------------------
+#    List Commands
+#----------------------------
+@click.command(short_help='List the available hapdab datasets',
+    help='Reports the available datasets **Frozen** in the minus80 database.'
+)
+@click.option('--name',  default=None,
+    help="The name of the dataset you want to check is available. The default value is the wildcard '*' which will return all available datasets with the specified dtype."
+)
+def list(name):
+    m80.Tools.available(dtype='HapDab',name=name)
+cli.add_command(list)
+
+
 
 #----------------------------
 #    Impute Commands
@@ -81,6 +102,5 @@ cli.add_command(remap)
 
 
 
-from minus80.cli.minus80 import cloud
 cli.add_command(cloud)
 
