@@ -7,7 +7,7 @@ class bref3:
         self.snvPerms = list(permutations(['A','C','G','T']))
 
     def readRecords(self):
-        # read the magin number
+        # read the magic number
         if self.read_int() != 2055763188:
             raise ValueError('file is not in bref3 format')
         program = self.read_utf()
