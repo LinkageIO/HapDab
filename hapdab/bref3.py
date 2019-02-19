@@ -40,12 +40,13 @@ class bref3:
         chrom = self.read_utf()
         # Number of distinct allele sequences in sequence coded records
         nSeqs = self.read_unsigned_short()
-        print(f'On chrom {chrom}')
 
         # index of sequence carried by each haplotype at sequence-coded records
         hap2Seq = []
         for j in range(0,2*len(samples)):
             hap2Seq.append(self.read_unsigned_short()) 
+
+        print(f'On chrom {chrom}, {nSeqs} distinct alleles here:{hap2Seq}')
 
         for j in range(0,nRecs):
             rec = self.readRecord(chrom,samples,nSeqs,hap2Seq)
