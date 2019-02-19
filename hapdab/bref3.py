@@ -16,6 +16,7 @@ class bref3:
 
         recList = []
         nRecs = self.read_int()
+        print(f'Reading {nRecs} records!')
         while(nRecs != 0):
             self.readDataBlock(samples, recList, nRecs)
             nRecs = self.read_int()
@@ -35,33 +36,55 @@ class bref3:
         return array
 
     def readDataBlock(self,samples, recList, nRecs):
+        # Chrom for all records in data block
         chrom = self.read_utf()
+        # Number of distinct allele sequences in sequence coded records
         nSeqs = self.read_unsigned_short()
+        print(f'On chrom {chrom}')
 
+        # index of sequence carried by each haplotype at sequence-coded records
         hap2Seq = []
         for j in range(0,2*len(samples)):
             hap2Seq.append(self.read_unsigned_short()) 
-        
+
         for j in range(0,nRecs):
             rec = self.readRecord(chrom,samples,nSeqs,hap2Seq)
             recList.append(rec)
-            breakpoint()
 
     def readRecord(self, chrom, samples, nSeqs, hap2Seq):
         marker = self.readMarker(chrom)
         coding = self.read_byte()
         if coding == 0:
+            print(f"{marker['id']}:seq coded")
             return self.readSeqCodedRecord(samples,marker,nSeqs,hap2Seq)
         elif coding == 1:
+            print(f"{marker['id']}:allele coded")
             return self.readAlleleCodedRecord(samples, marker)
+
+    def readMarker(self, chrom):
+        marker = dict()
+        marker['pos'] = self.read_int()
+        marker['id'] = self.readByteLengthStringArray()
+
+        alleleCode = self.read_byte()
+        if alleleCode == -1:
+            marker['alleles'] = self.read_string_array()
+            marker['end'] = self.read_int()
+        else:
+            marker['nAlleles'] = 1 + (alleleCode & 0b11)
+            permIndex = (alleleCode >> 2)
+            marker['alleles'] = self.snvPerms[permIndex][0:marker['nAlleles']]
+            marker['end'] = -1
+        return marker
 
     def readSeqCodedRecord(self,samples,marker,nSeqs,hap2Seq):
         seq2Allele = []
-        for j in range(0,nSeqs):
-            seq2Allele.append(self.read_insigned_byte())
+        for _ in range(nSeqs):
+            seq2Allele.append(self.read_unsigned_byte())
+        breakpoint()
         hap2Allele = []
-        for j in range(0,len(hap2Seq)):
-            hap2Allele.append(seq2Allele[hap2Seq[j]])
+        for x in hap2Seq:
+            hap2Allele.append(seq2Allele[x])
         record = dict()
         record['marker'] = marker
         record['samples'] = samples
@@ -100,22 +123,6 @@ class bref3:
             for j in range(0,length):
                 array.append(self.read_int())
             return array
-
-    def readMarker(self, chrom):
-        marker = dict()
-        marker['pos'] = self.read_int()
-        marker['id'] = self.readByteLengthStringArray()
-
-        alleleCode = self.read_byte()
-        if alleleCode == -1:
-            marker['alleles'] = self.readStringArray()
-            marker['end'] = self.read_int()
-        else:
-            marker['nAlleles'] = 1 + (alleleCode & 0b11)
-            permIndex = (alleleCode >> 2)
-            marker['alleles'] = self.snvPerms[permIndex][0:marker['nAlleles']]
-            marker['end'] = -1
-        return marker
 
     def read_boolean(self):
         return struct.unpack('?', self.stream.read(1))[0]
