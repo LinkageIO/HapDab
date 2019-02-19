@@ -81,7 +81,6 @@ class bref3:
         seq2Allele = []
         for _ in range(nSeqs):
             seq2Allele.append(self.read_unsigned_byte())
-        breakpoint()
         hap2Allele = []
         for x in hap2Seq:
             hap2Allele.append(seq2Allele[x])
